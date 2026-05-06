@@ -1637,100 +1637,98 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
   // Place a collapsed caret at the given screen point inside the editor.
   //
-  // The browser's default caret placement for clicks in/around inline atomic
-  // elements (our `contentEditable=false` glyph wrappers) is unreliable: in
-  // the margin gap between two glyphs it sometimes resolves to a position
-  // one or two slots off from where the user clicked, and at the end of the
-  // editor it can fail to surface a visible caret at all. We compute the
-  // position ourselves so a click between "1" and "2" actually anchors
-  // between "1" and "2".
+  // We can't trust the browser's `caretPositionFromPoint` /
+  // `caretRangeFromPoint` for clicks in the margin gap between two atomic
+  // inline-block glyphs: when the click misses every text node, the
+  // browser falls back to the nearest *text node* on the line, which in
+  // our editor is usually the trailing line-spacer ZWSP. That's why a
+  // click between glyph 1 and glyph 2 sometimes surfaces the caret
+  // between glyph 2 and 3, or near the end of the line.
+  //
+  // Instead, we do our own hit-test against the rendered glyph rects:
+  // find the glyph (or gap) under (x, y) and place the caret at the
+  // corresponding (parent, offset). This makes "click between two
+  // glyphs" land exactly between those glyphs.
   const placeCaretAtPoint = (clientX: number, clientY: number) => {
     const editor = editorRef.current;
     if (!editor) return false;
 
+    // Top-level glyph atoms (skip nested glyphs inside merged groups
+    // and cartouche children — those are decorative).
+    const topLevelGlyphs = Array.from(
+      editor.querySelectorAll<HTMLElement>(".svg-icon"),
+    ).filter((el) => !el.parentElement?.closest(".svg-icon"));
+
+    // Glyphs whose vertical band the click is on. Use a small slop so
+    // clicks in the inter-line margin still snap to the nearest line.
+    const inLine = topLevelGlyphs
+      .map((el) => ({ el, rect: el.getBoundingClientRect() }))
+      .filter(({ rect }) => clientY >= rect.top - 4 && clientY <= rect.bottom + 4)
+      .sort((a, b) => a.rect.left - b.rect.left);
+
     let node: Node | null = null;
     let offset = 0;
 
-    type CaretPositionFromPoint = (
-      x: number,
-      y: number,
-    ) => { offsetNode: Node; offset: number } | null;
-    const docWithCp = document as Document & {
-      caretPositionFromPoint?: CaretPositionFromPoint;
-    };
+    if (inLine.length > 0) {
+      // Walk the line left-to-right; place caret at the first gap whose
+      // right boundary is past the click x.
+      let target: HTMLElement | null = null;
+      let side: "before" | "after" = "before";
 
-    if (typeof docWithCp.caretPositionFromPoint === "function") {
-      const pos = docWithCp.caretPositionFromPoint(clientX, clientY);
-      if (pos) {
-        node = pos.offsetNode;
-        offset = pos.offset;
+      for (const { el, rect } of inLine) {
+        if (clientX < rect.left) {
+          // Click is in the gap *before* this glyph.
+          target = el;
+          side = "before";
+          break;
+        }
+        if (clientX <= rect.right) {
+          // Click is inside this glyph — pick the closer edge.
+          target = el;
+          side = clientX < (rect.left + rect.right) / 2 ? "before" : "after";
+          break;
+        }
       }
-    } else if (typeof document.caretRangeFromPoint === "function") {
-      const range = document.caretRangeFromPoint(clientX, clientY);
-      if (range) {
-        node = range.startContainer;
-        offset = range.startOffset;
-      }
-    }
 
-    // Lift the caret out of any glyph atom: the caret should never live
-    // *inside* a `contentEditable=false` wrapper. Pick the side closer to
-    // the click x.
-    const candidate =
-      node && node.nodeType === Node.ELEMENT_NODE
-        ? (node as Element)
-        : node?.parentElement || null;
-    const atom = candidate?.closest(".svg-icon") as HTMLElement | null;
-    if (atom && editor.contains(atom)) {
-      const rect = atom.getBoundingClientRect();
-      const placeBefore = clientX < (rect.left + rect.right) / 2;
-      const parent = atom.parentNode;
+      if (!target) {
+        // Click is past the last glyph on this line.
+        const last = inLine[inLine.length - 1];
+        target = last.el;
+        side = "after";
+      }
+
+      const parent = target.parentNode;
       if (parent) {
-        const idx = Array.from(parent.childNodes).indexOf(atom as ChildNode);
+        const idx = Array.from(parent.childNodes).indexOf(target as ChildNode);
         if (idx >= 0) {
           node = parent;
-          offset = placeBefore ? idx : idx + 1;
+          offset = side === "before" ? idx : idx + 1;
         }
       }
     }
 
-    if (!node || !editor.contains(node)) {
-      // Fall back to nearest top-level glyph in the click's y-band: pick
-      // the side (before/after) closer to click.x. This handles clicks in
-      // truly empty space at the end of the editor.
-      const topLevelGlyphs = Array.from(
-        editor.querySelectorAll<HTMLElement>(".svg-icon"),
-      ).filter((el) => !el.parentElement?.closest(".svg-icon"));
-      const inLine = topLevelGlyphs.filter((el) => {
-        const r = el.getBoundingClientRect();
-        return clientY >= r.top - 4 && clientY <= r.bottom + 4;
-      });
-      let bestAtom: HTMLElement | null = null;
-      let bestDist = Infinity;
-      let bestSide: "before" | "after" = "after";
-      for (const g of inLine) {
-        const r = g.getBoundingClientRect();
-        const distLeft = Math.abs(clientX - r.left);
-        const distRight = Math.abs(clientX - r.right);
-        if (distLeft < bestDist) {
-          bestDist = distLeft;
-          bestAtom = g;
-          bestSide = "before";
+    // No glyphs on this line (or hit-test failed): fall back to the
+    // browser's caret resolver, which is correct for plain-text lines.
+    if (!node) {
+      type CaretPositionFromPoint = (
+        x: number,
+        y: number,
+      ) => { offsetNode: Node; offset: number } | null;
+      const docWithCp = document as Document & {
+        caretPositionFromPoint?: CaretPositionFromPoint;
+      };
+
+      if (typeof docWithCp.caretPositionFromPoint === "function") {
+        const pos = docWithCp.caretPositionFromPoint(clientX, clientY);
+        if (pos) {
+          node = pos.offsetNode;
+          offset = pos.offset;
         }
-        if (distRight < bestDist) {
-          bestDist = distRight;
-          bestAtom = g;
-          bestSide = "after";
-        }
-      }
-      if (bestAtom && bestAtom.parentNode) {
-        const parent = bestAtom.parentNode;
-        const idx = Array.from(parent.childNodes).indexOf(
-          bestAtom as ChildNode,
-        );
-        if (idx >= 0) {
-          node = parent;
-          offset = bestSide === "before" ? idx : idx + 1;
+      } else if (typeof document.caretRangeFromPoint === "function") {
+        const range = document.caretRangeFromPoint(clientX, clientY);
+        if (range) {
+          node = range.startContainer;
+          offset = range.startOffset;
         }
       }
     }
@@ -1757,23 +1755,47 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     suppressEditorClickRef.current = false;
 
     const target = e.target as HTMLElement;
-    if (target.closest(".svg-icon")) {
-      // Click on a glyph atom: leave caret placement to the browser (it
-      // will pick the side of the atom closer to the click), and don't
-      // clear icon-selection state — the click handler decides.
+    const atom = target.closest(".svg-icon") as HTMLElement | null;
+
+    // Cartouche atoms keep the browser's default mousedown handling and
+    // their click-to-toggle workflow (inner-glyph selection for resize /
+    // customization).
+    if (atom && atom.dataset.cartouche === "true") {
       return;
     }
 
-    // Click in plain editor space (gap between glyphs, end of line, blank
-    // line, etc.). Take over caret placement so it lands exactly where the
-    // user clicked, and ensure the editor is focused so the caret is
-    // visible. preventDefault stops the browser from overwriting our
-    // position with its own (often-wrong) hit-test result.
+    // We only override the browser's caret/drag handling when the click
+    // is on or next to a glyph atom — that's where the browser's
+    // hit-test for atomic inline-blocks is unreliable. For plain-text
+    // lines we let the browser handle everything natively, otherwise
+    // calling preventDefault here would kill normal drag-selection of
+    // text.
+    const editor = editorRef.current;
+    let needsTakeover = !!atom;
+    if (!needsTakeover && editor) {
+      const topLevelGlyphs = Array.from(
+        editor.querySelectorAll<HTMLElement>(".svg-icon"),
+      ).filter((el) => !el.parentElement?.closest(".svg-icon"));
+      needsTakeover = topLevelGlyphs.some((el) => {
+        const r = el.getBoundingClientRect();
+        return e.clientY >= r.top - 4 && e.clientY <= r.bottom + 4;
+      });
+    }
+
+    if (!needsTakeover) {
+      // Pure plain-text click — let the browser focus, place caret, and
+      // start drag-selection on its own.
+      if (!atom) clearSelectedIcons();
+      return;
+    }
+
     e.preventDefault();
-    editorRef.current?.focus({ preventScroll: true });
+    editor?.focus({ preventScroll: true });
     placeCaretAtPoint(e.clientX, e.clientY);
 
-    clearSelectedIcons();
+    if (!atom) {
+      clearSelectedIcons();
+    }
   };
 
   const handleEditorMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -1808,20 +1830,16 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     // reaches the next one.
     //
     // We replace that with: for every glyph on the cursor's line, decide
-    // membership in the selection by two checks:
+    // membership in the selection by:
     //
     //   1. The glyph is on the OPPOSITE side of the anchor from the
-    //      cursor — i.e. it's actually between the anchor and the cursor
-    //      in document order.
-    //   2. The cursor has crossed the glyph's outer edge (its right edge
-    //      when dragging leftward, its left edge when dragging rightward).
+    //      cursor in document order.
+    //   2. The cursor has crossed the glyph's outer edge (the far edge
+    //      from the anchor along the line direction).
     //
-    // Snap selection focus to the far edge of the OUTERMOST such glyph
-    // (the leftmost when going left, the rightmost when going right). The
-    // direction is taken from cursor.x vs mousedown.x; the position
-    // relative to the anchor is computed via document order so we don't
-    // depend on screen-position rects (which Chrome returns as empty for
-    // collapsed ranges at the end of an editable container).
+    // The line direction is X for plain horizontal text and Y for content
+    // inside a `.vertical-run`. Snap selection focus to the far edge of
+    // the OUTERMOST such glyph in the dragging direction.
     const editor = editorRef.current;
     if (!editor) return;
 
@@ -1833,12 +1851,24 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
     const cursorX = e.clientX;
     const cursorY = e.clientY;
-    const extendingRight = cursorX >= start.x;
+
+    // Detect line orientation from the anchor's context — vertical when
+    // anchor lives inside a `.vertical-run`. Direction is computed along
+    // the line axis (X for horizontal, Y for vertical), and the
+    // perpendicular axis is used to filter glyphs to the same line.
+    const anchorEl =
+      anchorNode.nodeType === Node.ELEMENT_NODE
+        ? (anchorNode as Element)
+        : anchorNode.parentElement;
+    const verticalLine = !!anchorEl?.closest(".vertical-run");
+
+    const cursorAlong = verticalLine ? cursorY : cursorX;
+    const cursorPerp = verticalLine ? cursorX : cursorY;
+    const startAlong = verticalLine ? start.y : start.x;
+    const extendingForward = cursorAlong >= startAlong;
 
     // True iff the glyph comes after the selection anchor in document order.
     const isGlyphAfterAnchor = (g: HTMLElement): boolean => {
-      // Same-parent fast path (most common: anchor is at editor:offset and
-      // glyphs are direct children of editor).
       if (anchorNode === g.parentNode) {
         const idx = Array.from(anchorNode.childNodes).indexOf(g as ChildNode);
         return idx >= anchorOffset;
@@ -1847,9 +1877,6 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       if (cmp & Node.DOCUMENT_POSITION_FOLLOWING) return true;
       if (cmp & Node.DOCUMENT_POSITION_PRECEDING) return false;
       if (cmp & Node.DOCUMENT_POSITION_CONTAINS) {
-        // Anchor's node is an ancestor of the glyph. Walk up from glyph
-        // until we hit a child of anchorNode and compare its index vs
-        // anchorOffset.
         let cur: Node | null = g;
         while (cur && cur.parentNode !== anchorNode) cur = cur.parentNode;
         if (cur && cur.parentNode === anchorNode) {
@@ -1868,39 +1895,40 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       editor.querySelectorAll<HTMLElement>(".svg-icon"),
     ).filter((el) => !el.parentElement?.closest(".svg-icon"));
 
-    // Restrict to glyphs whose vertical band contains the cursor's y so
-    // we only snap on the cursor's line. Multi-line vertical drags fall
-    // through to native handling.
+    // Restrict to glyphs whose perpendicular-axis band contains the
+    // cursor — i.e. the cursor is on the same line as the glyph.
     const glyphsInLine = topLevelGlyphs.filter((el) => {
       const r = el.getBoundingClientRect();
-      return cursorY >= r.top - 4 && cursorY <= r.bottom + 4;
+      const perpStart = verticalLine ? r.left : r.top;
+      const perpEnd = verticalLine ? r.right : r.bottom;
+      return cursorPerp >= perpStart - 4 && cursorPerp <= perpEnd + 4;
     });
 
     if (glyphsInLine.length === 0) return;
 
     let bestGlyph: HTMLElement | null = null;
-    let bestEdge = extendingRight ? -Infinity : Infinity;
+    let bestEdge = extendingForward ? -Infinity : Infinity;
 
     for (const g of glyphsInLine) {
       const r = g.getBoundingClientRect();
+      const alongStart = verticalLine ? r.top : r.left;
+      const alongEnd = verticalLine ? r.bottom : r.right;
       const afterAnchor = isGlyphAfterAnchor(g);
-      if (extendingRight) {
-        // We're extending toward later document positions. Only consider
-        // glyphs that are after the anchor AND that the cursor has at
-        // least reached the left edge of.
-        if (afterAnchor && cursorX >= r.left) {
-          if (r.left > bestEdge) {
-            bestEdge = r.left;
+      if (extendingForward) {
+        // Glyphs after the anchor that the cursor has reached the near
+        // edge of (left for horizontal, top for vertical).
+        if (afterAnchor && cursorAlong >= alongStart) {
+          if (alongStart > bestEdge) {
+            bestEdge = alongStart;
             bestGlyph = g;
           }
         }
       } else {
-        // Extending toward earlier document positions. Only consider
-        // glyphs before the anchor that the cursor has reached the right
-        // edge of (i.e. cursor.x <= glyph.right).
-        if (!afterAnchor && cursorX <= r.right) {
-          if (r.right < bestEdge) {
-            bestEdge = r.right;
+        // Glyphs before the anchor that the cursor has reached the near
+        // edge of (right for horizontal, bottom for vertical).
+        if (!afterAnchor && cursorAlong <= alongEnd) {
+          if (alongEnd < bestEdge) {
+            bestEdge = alongEnd;
             bestGlyph = g;
           }
         }
@@ -1913,7 +1941,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     if (!parent) return;
     const idx = Array.from(parent.childNodes).indexOf(bestGlyph as ChildNode);
     if (idx < 0) return;
-    const focusOffset = extendingRight ? idx + 1 : idx;
+    const focusOffset = extendingForward ? idx + 1 : idx;
 
     try {
       sel.setBaseAndExtent(anchorNode, anchorOffset, parent, focusOffset);
@@ -4861,54 +4889,52 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     commitHistory("push");
   };
 
-  // ... (createMergedIcon, mergeGroup, updateAllIconTransforms, getEditorStyles) ...
-  const createMergedIcon = (icons: Element[]) => {
+  // ----- Merged-group layout (Group button) -----
+  //
+  // A merged group's *internal* layout is the opposite of its surrounding
+  // text orientation: when text is horizontal, the group stacks glyphs
+  // vertically (a quadrat); when text is vertical (i.e. the group lives
+  // inside a `.vertical-run`), the group lays glyphs out horizontally
+  // (side by side). This mirrors JSesh's behavior: the group is always
+  // perpendicular to the line direction.
+  //
+  // To make this dynamic — so flipping a section's orientation flips its
+  // groups too — the layout math is extracted from `createMergedIcon`
+  // into a pure helper, and an in-place `relayoutMergedIcon` reuses it
+  // to update an existing wrapper's slots.
+
+  type MergedSlot = { w: number; h: number; left: number; top: number };
+  type MergedLayout = {
+    wrapperW: number;
+    wrapperH: number;
+    slotDims: MergedSlot[];
+    columnMergeTargetW: number | null;
+    columnMergeTargetH: number | null;
+  };
+
+  const computeMergedLayout = (
+    icons: Element[],
+    horizontal: boolean,
+    baseSize: number,
+  ): MergedLayout | null => {
     const n = icons.length;
     if (n < 2) return null;
 
-    const horizontal = columnMode;
-    const maxComboW = Math.min(90, iconSize);
+    const maxComboW = Math.min(90, baseSize);
+
+    // Pixel gap between adjacent glyph slots. Keeps grouped glyphs
+    // visibly separate (matching JSesh's grouped-quadrat spacing) instead
+    // of rendering them flush against each other.
+    const INTERNAL_GAP = 2;
 
     let wrapperW: number;
     let wrapperH: number;
-    let slotDims: { w: number; h: number; left: number; top: number }[];
+    let slotDims: MergedSlot[];
     let columnMergeTargetW: number | null = null;
     let columnMergeTargetH: number | null = null;
 
-    // Pixel gap between adjacent glyph slots inside a merged group. Keeps
-    // grouped glyphs visibly separate (matching JSesh's grouped-quadrat
-    // spacing) instead of rendering them flush against each other.
-    const INTERNAL_GAP = 2;
-
-    if (horizontal) {
-      // Column mode + Group: box width/height = dimensions of the *biggest* selected icon.
-      const measureIconWH = (el: HTMLElement) => {
-        const r = el.getBoundingClientRect();
-        let w = r.width || parseFloat(el.style.width) || 0;
-        let h = r.height || parseFloat(el.style.height) || 0;
-        const svg = el.querySelector("svg") as SVGSVGElement | null;
-        if ((w <= 0 || h <= 0) && svg) {
-          w = parseFloat(svg.style.width) || iconSize;
-          h = parseFloat(svg.style.height) || iconSize;
-        }
-        if (w <= 0) w = iconSize;
-        if (h <= 0) h = iconSize;
-        return { w, h };
-      };
-
-      const extentM = icons.map((icon) => {
-        const { w, h } = measureIconWH(icon as HTMLElement);
-        return Math.max(w, h);
-      });
-      const maxExtent = Math.max(...extentM);
-      const refIdx = extentM.findIndex((m) => m === maxExtent);
-      const chosen = measureIconWH(icons[refIdx] as HTMLElement);
-      const targetW = Math.round(Math.min(90, Math.max(12, chosen.w)));
-      const targetH = Math.round(Math.min(90, Math.max(12, chosen.h)));
-      columnMergeTargetW = targetW;
-      columnMergeTargetH = targetH;
-
-      const aspectRatios: number[] = icons.map((icon) => {
+    const readAspectRatios = (): number[] =>
+      icons.map((icon) => {
         const el = icon as HTMLElement;
         const svg = el.querySelector("svg") as SVGSVGElement | null;
         if (svg) {
@@ -4919,17 +4945,28 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
             const vbH = parseFloat(parts[3]) || 1;
             return vbW / vbH;
           }
-          const sw = parseFloat(svg.style.width) || iconSize;
-          const sh = parseFloat(svg.style.height) || iconSize;
+          const sw = parseFloat(svg.style.width) || baseSize;
+          const sh = parseFloat(svg.style.height) || baseSize;
           return sw / sh;
         }
-        const ew = parseFloat(el.style.width) || iconSize;
-        const eh = parseFloat(el.style.height) || iconSize;
+        const ew = parseFloat(el.style.width) || baseSize;
+        const eh = parseFloat(el.style.height) || baseSize;
         return ew / eh;
       });
 
-      // Shrink-to-content height (no vertical whitespace) and never exceed current iconSize.
-      const heightCap = Math.min(90, iconSize);
+    if (horizontal) {
+      // Side-by-side: anchor the target box to baseSize × baseSize. We
+      // intentionally don't measure the source icons' bounding rects —
+      // for relayouts, the sources are already slot-sized clones, and
+      // reading their rects produces a shrunken box. baseSize keeps the
+      // group's horizontal dimensions stable across orientation flips.
+      const targetW = Math.round(Math.min(90, Math.max(12, baseSize)));
+      const targetH = Math.round(Math.min(90, Math.max(12, baseSize)));
+      columnMergeTargetW = targetW;
+      columnMergeTargetH = targetH;
+
+      const aspectRatios = readAspectRatios();
+      const heightCap = Math.min(90, baseSize);
       const desiredH = Math.min(targetH, heightCap);
 
       const rawWidths = aspectRatios.map((ar) => desiredH * ar);
@@ -4953,37 +4990,20 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         return dim;
       });
     } else {
-      // Vertical stack: wrapper width = iconSize (not widest glyph); max total height 90px (same idea as horizontal max-width).
+      // Vertical stack: wrapper width = baseSize; max total height 90px
+      // (mirrors the horizontal max-width cap).
       const MAX_GROUP_H = 90;
-      const aspectRatios: number[] = icons.map((icon) => {
-        const el = icon as HTMLElement;
-        const svg = el.querySelector("svg") as SVGSVGElement | null;
-        if (svg) {
-          const vb = svg.getAttribute("viewBox");
-          if (vb) {
-            const parts = vb.trim().split(/[\s,]+/);
-            const vbW = parseFloat(parts[2]) || 1;
-            const vbH = parseFloat(parts[3]) || 1;
-            return vbW / vbH;
-          }
-          const sw = parseFloat(svg.style.width) || iconSize;
-          const sh = parseFloat(svg.style.height) || iconSize;
-          return sw / sh;
-        }
-        const ew = parseFloat(el.style.width) || iconSize;
-        const eh = parseFloat(el.style.height) || iconSize;
-        return ew / eh;
-      });
+      const aspectRatios = readAspectRatios();
 
       const totalGapsH = (n - 1) * INTERNAL_GAP;
-      const slotH0 = Math.max(1, (iconSize - totalGapsH) / n);
+      const slotH0 = Math.max(1, (baseSize - totalGapsH) / n);
       const rawWidths = aspectRatios.map((ar) => slotH0 * ar);
       const maxRw = Math.max(...rawWidths, 1);
-      const wScale = maxRw > iconSize ? iconSize / maxRw : 1;
+      const wScale = maxRw > baseSize ? baseSize / maxRw : 1;
       let slotH = slotH0 * wScale;
       let gapH = INTERNAL_GAP * wScale;
       let scaledWidths = rawWidths.map((w) => w * wScale);
-      wrapperW = iconSize;
+      wrapperW = baseSize;
       wrapperH = n * slotH + (n - 1) * gapH;
 
       if (wrapperH > MAX_GROUP_H) {
@@ -4991,7 +5011,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         slotH *= hScale;
         gapH *= hScale;
         scaledWidths = scaledWidths.map((w) => w * hScale);
-        wrapperW = Math.min(Math.round(iconSize * hScale), maxComboW);
+        wrapperW = Math.min(Math.round(baseSize * hScale), maxComboW);
         wrapperH = MAX_GROUP_H;
       }
 
@@ -5010,6 +5030,53 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       });
       wrapperW = tightW;
     }
+
+    return {
+      wrapperW,
+      wrapperH,
+      slotDims,
+      columnMergeTargetW,
+      columnMergeTargetH,
+    };
+  };
+
+  // True iff the merged group at `node` should lay out horizontally —
+  // i.e. its line is running vertically (it's inside a .vertical-run).
+  const shouldMergedGroupBeHorizontal = (node: Node | null): boolean => {
+    if (!node) return false;
+    const el =
+      node.nodeType === Node.ELEMENT_NODE
+        ? (node as Element)
+        : node.parentElement;
+    return !!el?.closest(".vertical-run");
+  };
+
+  const createMergedIcon = (
+    icons: Element[],
+    options?: { horizontal?: boolean },
+  ) => {
+    const n = icons.length;
+    if (n < 2) return null;
+
+    // Orientation: explicit override > local context (closest vertical-run
+    // around the first source icon). We deliberately don't fall back to the
+    // global `columnMode`, because per-selection vertical sections can flip
+    // orientation independently of the global toggle.
+    const horizontal =
+      options?.horizontal !== undefined
+        ? options.horizontal
+        : shouldMergedGroupBeHorizontal(icons[0]);
+
+    const layout = computeMergedLayout(icons, horizontal, iconSize);
+    if (!layout) return null;
+    const {
+      wrapperW,
+      wrapperH,
+      slotDims,
+      columnMergeTargetW,
+      columnMergeTargetH,
+    } = layout;
+    const maxComboW = Math.min(90, iconSize);
 
     const mergedWrapper = document.createElement("span");
     mergedWrapper.className = "svg-icon merged";
@@ -5094,6 +5161,108 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
     cachePngForSvgIcon(mergedWrapper);
     return mergedWrapper;
+  };
+
+  // Re-flow an existing merged-group wrapper to the requested orientation.
+  // Reuses the inner glyph clones, recomputes slot positions, and updates
+  // wrapper / slot / inner-svg dimensions in place.
+  const relayoutMergedIcon = (
+    wrapper: HTMLElement,
+    horizontal: boolean,
+  ): boolean => {
+    // Skip MagicBox-customized groups: their slot positions are user-set
+    // and not derived from the line direction.
+    if (wrapper.dataset.magicbox === "true") return false;
+
+    const slotSpans = (Array.from(wrapper.children) as Element[]).filter(
+      (c): c is HTMLElement => c instanceof HTMLElement,
+    );
+    if (slotSpans.length < 2) return false;
+
+    const sources = slotSpans
+      .map((slot) => slot.firstElementChild as HTMLElement | null)
+      .filter((el): el is HTMLElement => !!el);
+    if (sources.length !== slotSpans.length) return false;
+
+    const baseSize = Number(wrapper.dataset.baseSize) || iconSize;
+    const layout = computeMergedLayout(sources, horizontal, baseSize);
+    if (!layout) return false;
+    const {
+      wrapperW,
+      wrapperH,
+      slotDims,
+      columnMergeTargetW,
+      columnMergeTargetH,
+    } = layout;
+
+    wrapper.style.width = `${wrapperW}px`;
+    wrapper.style.height = `${wrapperH}px`;
+    wrapper.dataset.layout = horizontal ? "horizontal" : "vertical";
+
+    if (
+      horizontal &&
+      columnMergeTargetW !== null &&
+      columnMergeTargetH !== null
+    ) {
+      wrapper.dataset.mergeColumnBox = "true";
+      wrapper.dataset.mergeColTargetW = String(columnMergeTargetW);
+      wrapper.dataset.mergeColTargetH = String(columnMergeTargetH);
+      wrapper.dataset.mergeColRef = String(baseSize);
+    } else {
+      delete wrapper.dataset.mergeColumnBox;
+      delete wrapper.dataset.mergeColTargetW;
+      delete wrapper.dataset.mergeColTargetH;
+      delete wrapper.dataset.mergeColRef;
+    }
+
+    slotSpans.forEach((slot, i) => {
+      const dim = slotDims[i];
+      if (!dim) return;
+      slot.style.left = `${dim.left}px`;
+      slot.style.top = `${dim.top}px`;
+      slot.style.width = `${dim.w}px`;
+      slot.style.height = `${dim.h}px`;
+
+      const inner = slot.firstElementChild as HTMLElement | null;
+      if (inner) {
+        inner.style.width = `${dim.w}px`;
+        inner.style.height = `${dim.h}px`;
+        const innerSvg = inner.querySelector("svg") as SVGElement | null;
+        if (innerSvg) {
+          innerSvg.removeAttribute("width");
+          innerSvg.removeAttribute("height");
+          (innerSvg.style as CSSStyleDeclaration).width = `${dim.w}px`;
+          (innerSvg.style as CSSStyleDeclaration).height = `${dim.h}px`;
+        }
+      }
+    });
+
+    cachePngForSvgIcon(wrapper);
+    return true;
+  };
+
+  // Walk every merged group in the editor and flip its orientation to
+  // match its current surrounding context (.vertical-run → horizontal,
+  // otherwise → vertical). Called after any vertical-mode toggle so
+  // existing groups stay perpendicular to the line.
+  const relayoutAllMergedIcons = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const merged = editor.querySelectorAll<HTMLElement>(".svg-icon.merged");
+    merged.forEach((m) => {
+      // Skip nested merged groups (a merged inside another merged, if that
+      // ever happens) — they get reflowed via their parent's layout.
+      if (m.parentElement?.closest(".svg-icon.merged")) return;
+      const horizontal = shouldMergedGroupBeHorizontal(m);
+      const currentLayout = m.dataset.layout;
+      if (
+        (horizontal && currentLayout === "horizontal") ||
+        (!horizontal && currentLayout === "vertical")
+      ) {
+        return;
+      }
+      relayoutMergedIcon(m, horizontal);
+    });
   };
 
   const updateAllIconDimensionsForLayout = () => {
@@ -5276,9 +5445,42 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     savedRangeRef.current = range.cloneRange();
   };
 
+  // Set the current selection to span all contents of `el` (inclusive of
+  // the first child's start through the last child's end). Used after
+  // wrap/unwrap so the toggle is reversible without re-selecting.
+  const selectContentsOf = (el: HTMLElement) => {
+    const sel = window.getSelection();
+    if (!sel) return;
+    const first = el.firstChild;
+    const last = el.lastChild;
+    if (!first || !last) return;
+    const newRange = document.createRange();
+    newRange.setStartBefore(first);
+    newRange.setEndAfter(last);
+    sel.removeAllRanges();
+    sel.addRange(newRange);
+    savedRangeRef.current = newRange.cloneRange();
+  };
+
+  // Restore the selection to span the run of nodes from `from` (inclusive)
+  // through `to` (inclusive), which must share the same parent. Used after
+  // unwrapping a vertical-run so the previously-wrapped content stays
+  // selected.
+  const selectRangeOfSiblings = (from: Node, to: Node) => {
+    const sel = window.getSelection();
+    if (!sel) return;
+    const newRange = document.createRange();
+    newRange.setStartBefore(from);
+    newRange.setEndAfter(to);
+    sel.removeAllRanges();
+    sel.addRange(newRange);
+    savedRangeRef.current = newRange.cloneRange();
+  };
+
   // Wrap the current selection in a `.vertical-run`. If the selection is
   // already entirely contained in a vertical-run, unwrap that run instead
-  // (toggle off). Returns true if the document was modified.
+  // (toggle off). The selection is preserved across the toggle so the
+  // user can re-click the button to reverse the change.
   const toggleVerticalForSelection = (range: Range): boolean => {
     const editor = editorRef.current;
     if (!editor) return false;
@@ -5291,10 +5493,11 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
     if (enclosingStart && enclosingStart === enclosingEnd) {
       const target = enclosingStart;
-      const sel = window.getSelection();
+      const firstChild = target.firstChild;
+      const lastChild = target.lastChild;
       unwrapElement(target);
-      if (sel) {
-        sel.removeAllRanges();
+      if (firstChild && lastChild) {
+        selectRangeOfSiblings(firstChild, lastChild);
       }
       return true;
     }
@@ -5315,11 +5518,9 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       wrapper.appendChild(fragment);
       range.insertNode(wrapper);
 
-      // Place the caret immediately after the wrapper so subsequent typing
-      // (Enter, plain text, etc.) happens in normal horizontal flow rather
-      // than inside the vertical-run, which would render text upright and
-      // visually overwrite the hieroglyphs already inside.
-      placeCaretAfter(wrapper);
+      // Keep the wrapped content selected so the user can click Vertical
+      // Mode again to undo, without having to re-select.
+      selectContentsOf(wrapper);
       return true;
     } catch {
       return false;
@@ -5418,6 +5619,9 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       const range = sel.getRangeAt(0);
       const changed = toggleVerticalForSelection(range);
       if (changed) {
+        // Merged groups inside the new (or removed) vertical-run need to
+        // flip orientation so they stay perpendicular to the line.
+        relayoutAllMergedIcons();
         resetTypingHistorySession();
         commitHistory("push");
       }
@@ -5432,6 +5636,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     } else {
       unwrapAllAutoHilo();
     }
+    relayoutAllMergedIcons();
     setColumnMode(nextColumnMode);
     resetTypingHistorySession();
     commitHistory("push");
@@ -6757,7 +6962,6 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
             toggleColumnMode={toggleColumnMode}
             mergeGroup={mergeGroup}
             selectedIconCount={selectedIconCount}
-            columnMode={columnMode}
             textSize={textSize}
             setTextSize={handleTextSizeChange}
             onImageSelected={insertImageAtCursor}

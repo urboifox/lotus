@@ -29,7 +29,6 @@ interface IProps {
   toggleColumnMode: () => void;
   mergeGroup: () => void;
   selectedIconCount: number;
-  columnMode: boolean;
   textSize: number;
   setTextSize: (textSize: number) => void;
   iconSize: number;
@@ -80,7 +79,6 @@ const Assistant = ({
   toggleColumnMode,
   mergeGroup,
   selectedIconCount,
-  columnMode,
   textSize,
   setTextSize,
   iconSize,
@@ -109,60 +107,105 @@ const Assistant = ({
   >("left");
   const [showShadingModal, setShowShadingModal] = React.useState(false);
   const [textColor, setTextColor] = React.useState("#000000");
+  // True when the caret / selection anchor sits inside a `.vertical-run`
+  // span. Drives the Vertical Mode button's active state so it behaves
+  // like Bold / Italic — reflecting the local context, not a global flag.
+  const [isInVerticalRun, setIsInVerticalRun] = React.useState(false);
 
-  // Check formatting state on keyup and click (only within editor)
-  React.useEffect(() => {
-    const updateFormattingState = (e: Event) => {
-      const target = e.target as HTMLElement;
+  // Read the current Selection and refresh every formatting-state flag
+  // (bold, italic, vertical-run, list, alignment, font, etc). Called
+  // from event listeners (click / keyup / selectionchange) and directly
+  // from button handlers that mutate the selection — needed because
+  // `selectionchange` is debounced in some browsers and may fire after
+  // the click handler that triggered it has already returned.
+  const refreshFromSelection = React.useCallback(() => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    const anchorNode = sel.anchorNode;
+    if (!anchorNode) return;
 
-      // Only update if event happened inside a contenteditable area
-      const editorElement = target.closest('[contenteditable="true"]');
+    const anchorEl =
+      anchorNode.nodeType === Node.ELEMENT_NODE
+        ? (anchorNode as Element)
+        : anchorNode.parentElement;
+    const editorElement = anchorEl?.closest('[contenteditable="true"]');
+    if (!editorElement) return;
 
-      if (!editorElement) {
-        // Don't change state if clicking outside editor
-        return;
+    try {
+      setIsBold(document.queryCommandState("bold"));
+      setIsItalic(document.queryCommandState("italic"));
+      setIsUnderline(document.queryCommandState("underline"));
+      setIsStrikethrough(document.queryCommandState("strikeThrough"));
+      setIsOrderedList(document.queryCommandState("insertOrderedList"));
+      setIsUnorderedList(document.queryCommandState("insertUnorderedList"));
+
+      const fontName = document.queryCommandValue("fontName") || "";
+      setIsGlyphFont(fontName.toLowerCase().includes("glyphtrl"));
+
+      if (document.queryCommandState("justifyCenter")) {
+        setTextAlign("center");
+      } else if (document.queryCommandState("justifyRight")) {
+        setTextAlign("right");
+      } else if (document.queryCommandState("justifyFull")) {
+        setTextAlign("justify");
+      } else {
+        setTextAlign("left");
       }
 
-      try {
-        setIsBold(document.queryCommandState("bold"));
-        setIsItalic(document.queryCommandState("italic"));
-        setIsUnderline(document.queryCommandState("underline"));
-        setIsStrikethrough(document.queryCommandState("strikeThrough"));
-        setIsOrderedList(document.queryCommandState("insertOrderedList"));
-        setIsUnorderedList(document.queryCommandState("insertUnorderedList"));
-
-        const fontName = document.queryCommandValue("fontName") || "";
-        setIsGlyphFont(fontName.toLowerCase().includes("glyphtrl"));
-
-        if (document.queryCommandState("justifyCenter")) {
-          setTextAlign("center");
-        } else if (document.queryCommandState("justifyRight")) {
-          setTextAlign("right");
-        } else if (document.queryCommandState("justifyFull")) {
-          setTextAlign("justify");
-        } else {
-          setTextAlign("left");
+      // Is the caret / selection anchor inside a `.vertical-run`?
+      let inVertical = false;
+      let node: Node | null = anchorNode;
+      while (node && node !== editorElement) {
+        if (
+          node instanceof HTMLElement &&
+          node.classList.contains("vertical-run")
+        ) {
+          inVertical = true;
+          break;
         }
-      } catch {
-        // ignore
+        node = node.parentNode;
       }
+      setIsInVerticalRun(inVertical);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  React.useEffect(() => {
+    const updateFromEditorEvent = (e: Event) => {
+      const target = e.target as HTMLElement;
+      const editorElement = target.closest('[contenteditable="true"]');
+      if (!editorElement) return;
+      refreshFromSelection();
     };
 
-    // Update on click in editor and keyup (after typing)
-    document.addEventListener("click", updateFormattingState as EventListener);
-    document.addEventListener("keyup", updateFormattingState as EventListener);
+    document.addEventListener("click", updateFromEditorEvent as EventListener);
+    document.addEventListener("keyup", updateFromEditorEvent as EventListener);
+    document.addEventListener("selectionchange", refreshFromSelection);
 
     return () => {
       document.removeEventListener(
         "click",
-        updateFormattingState as EventListener,
+        updateFromEditorEvent as EventListener,
       );
       document.removeEventListener(
         "keyup",
-        updateFormattingState as EventListener,
+        updateFromEditorEvent as EventListener,
       );
+      document.removeEventListener("selectionchange", refreshFromSelection);
     };
-  }, []);
+  }, [refreshFromSelection]);
+
+  // Wrap the Vertical Mode button click so we explicitly refresh state
+  // after `toggleColumnMode` runs. The toggle mutates DOM and re-sets
+  // the selection programmatically; the resulting `selectionchange` is
+  // sometimes debounced past the synchronous return of this handler, so
+  // we also schedule a refresh on the next animation frame to guarantee
+  // the button's active state catches up with the new selection.
+  const handleVerticalModeClick = () => {
+    toggleColumnMode();
+    requestAnimationFrame(refreshFromSelection);
+  };
 
   const handleBoldClick = () => {
     handleTextCommand("bold");
@@ -708,20 +751,20 @@ const Assistant = ({
       </div>
 
       <button
-        onClick={toggleColumnMode}
+        onClick={handleVerticalModeClick}
         title="Vertical mode: applies to your selection if any, otherwise to all hieroglyphs"
         style={{
           padding: "4px 8px",
-          backgroundColor: columnMode ? "#3b82f6" : "transparent",
-          color: columnMode ? "white" : "#374151",
-          border: `1px solid ${columnMode ? "#3b82f6" : "#d1d5db"}`,
+          backgroundColor: isInVerticalRun ? "#ccaa83" : "transparent",
+          color: isInVerticalRun ? "white" : "#374151",
+          border: `1px solid ${isInVerticalRun ? "#ccaa83" : "#d1d5db"}`,
           borderRadius: 4,
           cursor: "pointer",
           fontWeight: 500,
           fontSize: 12,
         }}
       >
-        {columnMode ? "Vertical Mode ✓" : "Vertical Mode"}
+        Vertical Mode
       </button>
 
       {/* --- Separator --- */}
