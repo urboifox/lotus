@@ -1,0 +1,127 @@
+@import "tailwindcss";
+@import "@fontsource/galada";
+@import "@fontsource-variable/urbanist";
+@import "@fontsource-variable/playfair-display";
+@import "@fontsource/ephesis";
+@import "@fontsource/poppins";
+
+body {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  background-color: #fef6eb;
+  scroll-behavior: smooth;
+}
+
+.editor-content ul,
+.editor-content ol {
+  list-style-position: outside;
+  margin: 0.5rem 0 0.5rem 1.5rem;
+  padding-left: 1.25rem;
+}
+
+.editor-content ul {
+  list-style-type: disc;
+}
+
+.editor-content ol {
+  list-style-type: decimal;
+}
+
+.editor-content li {
+  margin: 0.25rem 0;
+}
+
+/* Vertical run wrapper. Applied via the "Vertical Mode" toolbar button to
+   either the user's selection or to consecutive hieroglyph runs (`auto-hilo`).
+   Keeps surrounding text horizontal while letting hieroglyphs read top-to-bottom. */
+.editor-content .vertical-run {
+  writing-mode: vertical-lr;
+  text-orientation: upright;
+  display: inline-block;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+/* Glyphs themselves stay rendered in their normal horizontal coordinate
+   system; only the *layout* of the run is vertical. This prevents inherited
+   writing-mode from rotating the SVG content inside each glyph. */
+.editor-content .vertical-run .svg-icon,
+.editor-content .vertical-run .svg-icon svg {
+  writing-mode: horizontal-tb;
+  text-orientation: mixed;
+}
+
+.g5-icon,
+.g5-icon path {
+  fill: currentColor !important;
+}
+@theme {
+  --color-primary: #d8a865;
+  --color-primary-light: #ffd498;
+  --color-secondary: #121212;
+  --color-background: #fbf2e6;
+  --color-footer: #a97c3c;
+  --color-common: #ffffff;
+  --color-placeholder: #514f4a;
+  /* font-family */
+  --font-galada: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  --font-urbanist: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  --font-playfair-display: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  --font-ephesis: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  --font-poppins: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  --font-latin: "GlyphTRL", sans-serif;
+}
+@font-face {
+  font-family: "GlyphTRL";
+  src: url("/src/assets/fonts/GLYPHTRL.TTF") format("truetype");
+}
+select:focus {
+  outline: none;
+  border: none;
+  box-shadow: none;
+}
+
+@utility container {
+  margin-inline: auto;
+  padding-inline: 2rem;
+
+  @media (min-width: 576px) {
+    max-width: 576px;
+  }
+  @media (min-width: 768px) {
+    max-width: 768px;
+  }
+  @media (min-width: 992px) {
+    max-width: 992px;
+  }
+  @media (min-width: 1200px) {
+    max-width: 1200px;
+  }
+  @media (min-width: 1400px) {
+    max-width: 1400px;
+    padding-inline: 1rem;
+  }
+}
+
+@layer components {
+  .form-input {
+    @apply border border-[#D8A86585] rounded-lg px-8 py-2 bg-[#FEF6EB]
+           focus:outline-none w-full placeholder:text-[#9B9B9B]
+           placeholder:font-normal;
+  }
+
+  .form-textarea {
+    @apply border border-[#D8A86585] rounded-lg px-8 py-2 bg-[#FEF6EB]
+           focus:outline-none w-full placeholder:text-[#9B9B9B]
+           placeholder:font-normal h-[100px] align-top resize-none;
+  }
+}
+
+/* ::selection {
+  background: rgba(59, 130, 246, 0.3);
+} */
+/* Lexical adds .selected to selected nodes
+.svg-node.selected {
+  background-color: rgba(59, 130, 246, 0.3);
+  border-radius: 2px;
+  color: red;
+} */
