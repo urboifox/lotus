@@ -128,6 +128,10 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
   );
   const [showShadingOptions, setShowShadingOptions] = useState(false);
   const [selectedIconHasShading, setSelectedIconHasShading] = useState(false);
+  // Representative rotation (degrees, 0..359) for the current selection.
+  // 0 if nothing selected or if selection mixes different rotations — the
+  // toolbar uses this to highlight the Rotate button and seed the dial.
+  const [selectedIconRotation, setSelectedIconRotation] = useState(0);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [showMagicBox, setShowMagicBox] = useState(false);
   const [showSharedAccessPlansModal, setShowSharedAccessPlansModal] =
@@ -1241,15 +1245,26 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     const marker = document.createElement("span");
     marker.dataset.selectionBoundary = "true";
     marker.textContent = "\u200B";
+    // The boundary is a caret-anchor that lives at the very start of the
+    // editor when the first child is a glyph. It has to be:
+    //   - zero visual width (its only character is U+200B which is itself
+    //     zero-width — no extra width clamp needed),
+    //   - hidden from copy / paste UI, and
+    //   - tall enough that a caret placed inside it has a visible height.
+    //
+    // Earlier versions clamped `font-size: 0; line-height: 0;` here to
+    // prevent the boundary from contributing to line height. The side
+    // effect was catastrophic: when the user clicked in the empty space
+    // before the first glyph, the browser snapped the caret inside this
+    // span and rendered it at 0 px — completely invisible. Worse, any
+    // character typed at that caret was inserted as text inside the
+    // 0-px-tall span and stayed invisible too. Removing the font-size /
+    // line-height overrides keeps the caret visible; the boundary still
+    // renders as zero width because the ZWSP is zero-width, and the rest
+    // of the line geometry comes from the adjacent glyph anyway.
     marker.style.cssText = `
-      display: inline-block;
-      width: 0;
-      overflow: hidden;
-      font-size: 0;
-      line-height: 0;
+      display: inline;
       color: transparent;
-      vertical-align: top;
-      pointer-events: none;
       user-select: text;
     `;
     editor.insertBefore(marker, firstMeaningfulChild);
@@ -1269,6 +1284,85 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       );
       if (!boundary || !boundary.parentNode) return;
       boundary.parentNode.insertBefore(node, boundary.nextSibling);
+    });
+
+    // Promote any text the user typed inside the leading selection-boundary
+    // span out to the editor's plain children. Without this, a click in the
+    // empty space before the first glyph (which `placeCaretAtPoint` resolves
+    // into the boundary span) traps every typed character inside the
+    // transparent-coloured boundary, making typing appear to do nothing.
+    Array.from(
+      editor.querySelectorAll('[data-selection-boundary="true"]'),
+    ).forEach((node) => {
+      const boundary = node as HTMLElement;
+      const parent = boundary.parentNode;
+      if (!parent) return;
+
+      const text = (boundary.textContent || "").replace(/\u200B/g, "");
+      if (text.length === 0) return; // nothing to promote
+
+      const sel = window.getSelection();
+      const caretInside =
+        !!sel &&
+        sel.rangeCount > 0 &&
+        sel.anchorNode != null &&
+        boundary.contains(sel.anchorNode);
+      const caretNode: Node | null = caretInside ? sel!.anchorNode : null;
+      let caretOffset = caretInside ? sel!.anchorOffset : 0;
+
+      // Strip the ZWSPs from each text node in-place (so we don't replace
+      // the caret-anchored node) and adjust the caret offset for any
+      // ZWSPs removed before it.
+      const textNodes: Text[] = [];
+      const walker = document.createTreeWalker(boundary, NodeFilter.SHOW_TEXT);
+      let cur: Node | null = walker.nextNode();
+      while (cur) {
+        textNodes.push(cur as Text);
+        cur = walker.nextNode();
+      }
+      textNodes.forEach((t) => {
+        if (!t.data.includes("\u200B")) return;
+        if (t === caretNode) {
+          const before = t.data.substring(0, caretOffset);
+          const removedBefore = (before.match(/\u200B/g) || []).length;
+          caretOffset -= removedBefore;
+        }
+        t.data = t.data.replace(/\u200B/g, "");
+      });
+
+      // Unwrap the boundary span so the typed text becomes a regular
+      // child of the editor. A fresh leading boundary will be re-added
+      // by the next `ensureLeadingSelectionBoundary` pass if the first
+      // child is still a glyph.
+      while (boundary.firstChild) {
+        parent.insertBefore(boundary.firstChild, boundary);
+      }
+      parent.removeChild(boundary);
+
+      if (
+        caretInside &&
+        caretNode &&
+        caretNode.parentNode &&
+        sel &&
+        (caretNode.nodeType !== Node.TEXT_NODE ||
+          (caretNode as Text).data !== undefined)
+      ) {
+        const len =
+          caretNode.nodeType === Node.TEXT_NODE
+            ? (caretNode as Text).data.length
+            : (caretNode.childNodes.length ?? 0);
+        const safeOffset = Math.max(0, Math.min(caretOffset, len));
+        try {
+          const r = document.createRange();
+          r.setStart(caretNode, safeOffset);
+          r.collapse(true);
+          sel.removeAllRanges();
+          sel.addRange(r);
+          savedRangeRef.current = r.cloneRange();
+        } catch {
+          // best-effort
+        }
+      }
     });
 
     Array.from(
@@ -1417,6 +1511,23 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
             firstRealNode.tagName === "IMG");
 
         if (startsWithNonEditable) {
+          // Drop empty / ZWSP-only text nodes that appear *before* the
+          // first real element on this line. They're invisible noise
+          // left behind by Backspace cycles inside spacer/boundary
+          // spans, and leaving them in place causes the spacer
+          // enforcement to keep adding fresh spacers on every input,
+          // which manifests as "extra empty lines" the user can't
+          // delete cleanly.
+          segment.forEach((n) => {
+            if (n === firstRealNode) return;
+            if (
+              n.nodeType === Node.TEXT_NODE &&
+              (n.textContent || "").replace(/\u200B/g, "").length === 0
+            ) {
+              n.parentNode?.removeChild(n);
+            }
+          });
+
           let keep: HTMLElement | null = null;
           if (spacers.length) {
             keep = spacers[0];
@@ -1504,6 +1615,19 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       setSelectedSingleIcon(null);
       setSelectedIconHasShading(false);
     }
+    // Reflect the selection's rotation in the toolbar dial. If multiple
+    // icons are selected with the same rotation we surface that value;
+    // a mixed selection collapses to 0 so the dial / preset highlight
+    // doesn't lie about a single-source-of-truth angle.
+    if (selectedIcons.length > 0) {
+      const angles = selectedIcons.map((n) =>
+        normalizeAngle(Number((n as HTMLElement).dataset.rotation || "0")),
+      );
+      const allEqual = angles.every((a) => a === angles[0]);
+      setSelectedIconRotation(allEqual ? angles[0] : 0);
+    } else {
+      setSelectedIconRotation(0);
+    }
     // Refresh inner cartouche +/- controls
     updateCartoucheInnerResizeControls();
   }, [selectedIcons, iconSize, updateCartoucheInnerResizeControls]);
@@ -1563,6 +1687,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         el.style.backgroundColor = "";
       });
       if (rangeIcons > 0) {
+        const realIcons: HTMLElement[] = [];
         selectedInFragment.forEach((icon) => {
           const id = (icon as HTMLElement).dataset.id;
           if (id) {
@@ -1571,9 +1696,22 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
             ) as HTMLElement | null;
             if (realIcon) {
               realIcon.style.backgroundColor = "#3b82f6";
+              realIcons.push(realIcon);
             }
           }
         });
+        // Mirror the explicit-selection rotation logic for range
+        // selections so the Rotate dial reflects whichever path the
+        // user is currently driving.
+        if (explicit === 0 && realIcons.length > 0) {
+          const angles = realIcons.map((el) =>
+            normalizeAngle(Number(el.dataset.rotation || "0")),
+          );
+          const allEqual = angles.every((a) => a === angles[0]);
+          setSelectedIconRotation(allEqual ? angles[0] : 0);
+        }
+      } else if (explicit === 0) {
+        setSelectedIconRotation(0);
       }
     };
     document.addEventListener("selectionchange", onSelectionChange);
@@ -1742,6 +1880,28 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         if (idx >= 0) {
           node = parent;
           offset = side === "before" ? idx : idx + 1;
+
+          // Special case: clicking the empty space before the first glyph
+          // of the editor's first line. We have a leading
+          // `data-selection-boundary` span there that exists precisely so
+          // the caret has somewhere to land. Anchor INSIDE its text node
+          // (at the end of its U+200B) instead of at (editor, idx) — at
+          // an element-boundary offset Chrome would either snap the
+          // caret somewhere unpredictable or render it 0px tall and the
+          // user would think the click did nothing.
+          if (side === "before" && parent === editor) {
+            const prevSibling = target.previousSibling;
+            if (
+              prevSibling instanceof HTMLElement &&
+              prevSibling.dataset.selectionBoundary === "true" &&
+              prevSibling.firstChild &&
+              prevSibling.firstChild.nodeType === Node.TEXT_NODE
+            ) {
+              const txt = prevSibling.firstChild as Text;
+              node = txt;
+              offset = txt.data.length;
+            }
+          }
         }
       }
     }
@@ -2178,6 +2338,79 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     const icon = element?.closest(".svg-icon") as HTMLElement | null;
     if (!icon || !editor.contains(icon)) return null;
     return normalizeSelectableIcon(icon);
+  };
+
+  // Returns true iff there is something the user would consider "real
+  // content" between the caret and the chosen edge of the editor. The
+  // leading data-selection-boundary span, line-spacer ZWSPs, and pure
+  // whitespace text nodes don't count — those are caret anchors, not
+  // content. We use this to swallow Backspace at the very start of the
+  // editor (and Delete at the very end), because Chrome's default
+  // behaviour at those edges is to delete the adjacent atomic inline
+  // element (i.e. eat your first/last glyph).
+  const hasMeaningfulContentOnSide = (
+    editor: HTMLElement,
+    range: Range,
+    direction: "backward" | "forward",
+  ): boolean => {
+    if (!range.collapsed) return true;
+
+    const isIgnorableNode = (n: Node | null): boolean => {
+      if (!n) return false;
+      if (
+        n instanceof HTMLElement &&
+        (n.dataset?.selectionBoundary === "true" ||
+          n.dataset?.editorLineSpacer === "true")
+      ) {
+        return true;
+      }
+      if (n.nodeType === Node.TEXT_NODE) {
+        return (n.textContent || "").replace(/\u200B/g, "").length === 0;
+      }
+      return false;
+    };
+
+    const container = range.startContainer;
+    const offset = range.startOffset;
+
+    // Same node first: any non-ZWSP characters on the relevant side of
+    // the caret in the current text node count as content.
+    if (container.nodeType === Node.TEXT_NODE) {
+      const text = container.textContent || "";
+      const slice =
+        direction === "backward"
+          ? text.substring(0, offset)
+          : text.substring(offset);
+      if (slice.replace(/\u200B/g, "").length > 0) return true;
+    } else if (container.nodeType === Node.ELEMENT_NODE) {
+      const element = container as Element;
+      const childs = Array.from(element.childNodes);
+      const range =
+        direction === "backward"
+          ? childs.slice(0, offset)
+          : childs.slice(offset);
+      for (const child of range) {
+        if (!isIgnorableNode(child)) return true;
+      }
+    }
+
+    // Walk up the tree, checking siblings on the relevant side at each
+    // level. The first non-ignorable sibling we find is real content.
+    let current: Node | null = container;
+    while (current && current !== editor) {
+      let sib =
+        direction === "backward"
+          ? current.previousSibling
+          : current.nextSibling;
+      while (sib) {
+        if (!isIgnorableNode(sib)) return true;
+        sib =
+          direction === "backward" ? sib.previousSibling : sib.nextSibling;
+      }
+      current = current.parentNode;
+    }
+
+    return false;
   };
 
   const removeAdjacentSvgIcon = (
@@ -2652,7 +2885,24 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       return;
     }
 
+    // If the caret is at the very start of the editor's real content
+    // (only ignorable boundary/spacer/empty-text nodes precede it),
+    // swallow Backspace. The browser's native Backspace at this position
+    // otherwise tries to delete the next atomic inline-block — i.e. the
+    // first glyph — and a held-down Backspace then peels the entire
+    // line away one glyph at a time. Symmetric guard for Delete at the
+    // end of all real content.
+    if (e.key === "Backspace" && !hasMeaningfulContentOnSide(editor, range, "backward")) {
+      e.preventDefault();
+      return;
+    }
+
     if (e.key === "Delete" && removeAdjacentSvgIcon(editor, range, "forward")) {
+      e.preventDefault();
+      return;
+    }
+
+    if (e.key === "Delete" && !hasMeaningfulContentOnSide(editor, range, "forward")) {
       e.preventDefault();
       return;
     }
@@ -2747,12 +2997,26 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       return;
     }
 
-    // Pressing Enter while the caret is inside a `.vertical-run` would
-    // otherwise insert a line break in vertical writing mode, which renders
-    // upright and visually overlaps the hieroglyphs in the run. Escape the
-    // run first, then insert the line break at the new (horizontal) location.
-    if (e.key === "Enter" && range.collapsed) {
-      const enclosing = findEnclosingVerticalRun(range.startContainer, editor);
+    // Pressing Enter while the selection sits inside a `.vertical-run`
+    // would otherwise either (a) insert a line break in vertical writing
+    // mode — renders upright and overlaps the hieroglyphs in the run, or
+    // (b) for a NON-collapsed selection, fall through to the generic
+    // Enter branch and `range.deleteContents()` would wipe every glyph
+    // in the run (the typical case right after toggling vertical mode,
+    // because we deliberately preserve the selection across the wrapper's
+    // contents so the user can revert). In both cases we want the same
+    // outcome: jump out of the vertical-run, drop a clean line break,
+    // and let the user type horizontally on the new line.
+    if (e.key === "Enter") {
+      const enclosingStart = findEnclosingVerticalRun(
+        range.startContainer,
+        editor,
+      );
+      const enclosingEnd = findEnclosingVerticalRun(
+        range.endContainer,
+        editor,
+      );
+      const enclosing = enclosingStart || enclosingEnd;
       if (enclosing) {
         e.preventDefault();
         placeCaretAfter(enclosing);
@@ -2857,6 +3121,59 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       return "scaleX(-1)";
     }
     return "none";
+  };
+
+  // Normalize an arbitrary angle into [0, 360). Negative or > 360 inputs
+  // (from typed numbers, dial drags that go past the seam, etc.) all land
+  // back inside the canonical range so the data-rotation attribute stays
+  // tidy across history snapshots and copy/paste round-trips.
+  const normalizeAngle = (deg: number): number => {
+    if (!Number.isFinite(deg)) return 0;
+    const wrapped = ((deg % 360) + 360) % 360;
+    return Math.round(wrapped * 1000) / 1000;
+  };
+
+  // Compose the inline `transform` for a single icon wrapper from its
+  // independent visual states: RTL document flip, user rotation, and the
+  // legacy per-icon scale (set by some legacy paths). Order matters — we
+  // apply the rotation BEFORE the RTL flip in CSS-source order (which
+  // means the flip applies after rotation in screen-space) so the user's
+  // rotation always reads as "rotate the visible glyph by N°", same as
+  // every other editor that ships a rotate handle.
+  const composeIconTransform = (el: HTMLElement): string => {
+    const rotation = normalizeAngle(Number(el.dataset.rotation || "0"));
+    const flipped = direction === "rtl";
+    const isMerged = el.classList.contains("merged");
+    const scale = isMerged
+      ? 1
+      : Number(el.dataset.scale || "1") || 1;
+
+    const parts: string[] = [];
+    if (flipped) parts.push("scaleX(-1)");
+    if (rotation !== 0) parts.push(`rotate(${rotation}deg)`);
+    if (scale !== 1) parts.push(`scale(${scale})`);
+
+    return parts.length === 0 ? "none" : parts.join(" ");
+  };
+
+  // Set an icon's rotation (in degrees) and re-derive its inline transform.
+  // No-ops on nested glyphs (inside merged groups or cartouches) — those
+  // are visual children of an outer wrapper and rotate with their parent.
+  const applyRotationToIcon = (el: HTMLElement, angle: number) => {
+    if (!el.classList.contains("svg-icon")) return;
+    if (el.parentElement?.closest(".svg-icon")) return;
+    const normalized = normalizeAngle(angle);
+    if (normalized === 0) {
+      delete el.dataset.rotation;
+    } else {
+      el.dataset.rotation = String(normalized);
+    }
+    el.style.transform = composeIconTransform(el);
+    // Setting transform to a non-identity value can clip antialiased
+    // edges of children rendered with subpixel accumulators in some
+    // browsers; nudging transform-origin to centre keeps the rotation
+    // about the icon's middle (the natural expectation).
+    el.style.transformOrigin = normalized === 0 ? "" : "center center";
   };
 
   /** Compute icon SVG width/height from pictureSize, baseSize, aspect ratio, and layout mode.
@@ -5466,23 +5783,18 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     if (!editor) return;
 
     const allIcons = editor.querySelectorAll(".svg-icon");
-    const baseTransform = getSvgTransform();
 
     allIcons.forEach((icon) => {
       const el = icon as HTMLElement;
       if (el.closest(".svg-icon.merged") && !el.classList.contains("merged"))
         return;
-      const scale = el.classList.contains("merged")
-        ? 1
-        : Number(el.dataset.scale || "1") || 1;
-      const scaleTransform = scale !== 1 ? `scale(${scale})` : "";
       if (el.closest(".cartouche-wrapper") && !el.dataset.cartouche) {
         return;
       }
       if (el.dataset.cartouche === "true") {
         const wasVertical = el.dataset.vertical === "true";
         const shouldBeVertical = columnMode;
-        el.style.transform = direction === "rtl" ? "scaleX(-1)" : "none";
+        el.style.transform = composeIconTransform(el);
 
         if (wasVertical !== shouldBeVertical) {
           el.dataset.vertical = shouldBeVertical ? "true" : "false";
@@ -5577,13 +5889,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         }
         return;
       } else {
-        if (baseTransform === "none") {
-          el.style.transform = scaleTransform || "none";
-        } else if (scaleTransform) {
-          el.style.transform = `${baseTransform} ${scaleTransform}`;
-        } else {
-          el.style.transform = baseTransform;
-        }
+        el.style.transform = composeIconTransform(el);
       }
     });
   };
@@ -5879,6 +6185,89 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     return () => document.removeEventListener("copy", handleGlobalCopy);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIcons]);
+
+  // Resolve the set of top-level icons the next "selection-aware" command
+  // (group, cartouche-wrap, rotate, ...) should operate on. Mirrors the
+  // logic inside `mergeGroup`: prefer the explicit `selectedIcons` state
+  // if non-empty, otherwise materialize whatever top-level glyphs the
+  // current Range covers. Returned in document order.
+  const collectSelectedTopLevelIcons = (): HTMLElement[] => {
+    const editor = editorRef.current;
+    if (!editor) return [];
+
+    let collected: HTMLElement[] = [];
+    if (selectedIcons.length >= 1) {
+      collected = selectedIcons.filter(
+        (n): n is HTMLElement => n instanceof HTMLElement,
+      );
+    } else {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return [];
+      const range = sel.getRangeAt(0);
+      if (!editor.contains(range.commonAncestorContainer)) return [];
+
+      // For a collapsed caret, also accept the icon directly under the
+      // caret if the user clicked one (via selectedIcons it's already
+      // covered, but we still want this branch for keyboard navigation).
+      if (range.collapsed) return [];
+
+      const fragment = range.cloneContents();
+      const mergedGroups = Array.from(
+        fragment.querySelectorAll(".svg-icon.merged"),
+      );
+      const standaloneIcons = Array.from(
+        fragment.querySelectorAll(".svg-icon"),
+      ).filter((n) => {
+        const el = n as HTMLElement;
+        if (el.classList.contains("merged")) return false;
+        if (el.closest(".svg-icon.merged")) return false;
+        return true;
+      });
+      const allInFragment = [...mergedGroups, ...standaloneIcons];
+      collected = allInFragment
+        .map((n) => {
+          const id = (n as HTMLElement).dataset.id;
+          if (!id) return null;
+          return editor.querySelector(
+            `.svg-icon[data-id="${id}"]`,
+          ) as HTMLElement | null;
+        })
+        .filter((el): el is HTMLElement => !!el);
+    }
+
+    // De-dupe and sort in document order.
+    const unique = Array.from(new Set(collected));
+    unique.sort((a, b) =>
+      a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
+    );
+    return unique;
+  };
+
+  // Apply `angle` (degrees) to every currently-selected top-level glyph.
+  // Multi-selection rotates each glyph independently around its own
+  // centre — matches the user's request: "as if he selected each one
+  // then rotated".
+  //
+  // `commit` controls history: `false` while a dial drag is in progress
+  // (preview only), `true` when the user releases / clicks a preset, so
+  // the entire drag collapses into a single undo step.
+  const rotateSelection = (
+    angle: number,
+    options?: { commit?: boolean },
+  ) => {
+    if (!editorCanEdit) return;
+    const targets = collectSelectedTopLevelIcons();
+    if (targets.length === 0) return;
+
+    const normalized = normalizeAngle(angle);
+    targets.forEach((el) => applyRotationToIcon(el, normalized));
+    setSelectedIconRotation(normalized);
+
+    if (options?.commit !== false) {
+      resetTypingHistorySession();
+      commitHistory("push");
+    }
+  };
 
   const mergeGroup = () => {
     if (!editorCanEdit) return;
@@ -7160,6 +7549,8 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
             onMagicBox={openMagicBox}
             iconVerticalAlign={iconVerticalAlignDefault}
             onIconVerticalAlign={applyIconVerticalAlign}
+            selectedIconRotation={selectedIconRotation}
+            onRotateSelection={rotateSelection}
           />
         </div>
 

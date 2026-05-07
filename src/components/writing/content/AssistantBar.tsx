@@ -21,6 +21,7 @@ import {
 import TextSize from "./TextSize";
 import IconSize from "./IconSize";
 import ShadingPatterns from "./ShadingPatterns";
+import RotateGlyph from "./RotateGlyph";
 
 interface IProps {
   handleTextCommand: (command: string, value?: string | null) => void;
@@ -45,6 +46,11 @@ interface IProps {
   onMagicBox?: () => void;
   iconVerticalAlign?: "top" | "middle" | "bottom";
   onIconVerticalAlign?: (align: "top" | "middle" | "bottom") => void;
+  selectedIconRotation?: number;
+  onRotateSelection?: (
+    angle: number,
+    options?: { commit?: boolean },
+  ) => void;
 }
 // Cartouche SVG icon component
 const CartoucheIcon = () => (
@@ -93,6 +99,8 @@ const Assistant = ({
   onMagicBox,
   iconVerticalAlign = "middle",
   onIconVerticalAlign,
+  selectedIconRotation = 0,
+  onRotateSelection,
 }: IProps) => {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isBold, setIsBold] = React.useState(false);
@@ -873,6 +881,15 @@ const Assistant = ({
       >
         &#x2728; Edit Group
       </button>
+
+      {/* --- ROTATE BUTTON / DIAL POPOVER --- */}
+      {onRotateSelection && (
+        <RotateGlyph
+          selectedIconCount={selectedIconCount}
+          selectedIconRotation={selectedIconRotation}
+          onRotateSelection={onRotateSelection}
+        />
+      )}
 
       {/* --- SHADING PATTERN MODAL --- */}
       {showShadingModal && (
