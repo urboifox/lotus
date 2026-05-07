@@ -91,6 +91,23 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
   const draggedElementRef = useRef<HTMLElement | null>(null);
   const savedRangeRef = useRef<Range | null>(null);
   const pngCacheRef = useRef<Map<string, string>>(new Map());
+  // Deferred / chunked PNG-cache scheduler.
+  //
+  // `cachePngForSvgIcon` allocates a canvas at COPY_SCALE×, serializes the
+  // SVG, fires an async <img> decode, then synchronously encodes a PNG via
+  // `canvas.toDataURL`. Calling that for *every* icon in handlers like
+  // `handleIconSizeChange` (which iterates the whole document) was the cause
+  // of the RAM spike + UI freeze on "select all + change size": many large
+  // canvases live in memory at once and many toDataURL calls block the main
+  // thread back-to-back.
+  //
+  // Instead, we queue icons to be re-rasterized and process the queue in
+  // small chunks during browser idle time. The Map is keyed by data-id so
+  // repeated requests for the same icon coalesce. Flushing also prunes
+  // cache entries for icons that no longer exist in the editor (merge /
+  // relayout assigns new ids, leaving the old entries dangling forever).
+  const pngCacheQueueRef = useRef<Map<string, HTMLElement>>(new Map());
+  const pngCacheScheduledRef = useRef<number | null>(null);
   const historyRef = useRef<HistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
   const isApplyingHistoryRef = useRef(false);
@@ -666,7 +683,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       icons.forEach((icon) => {
         const el = icon as HTMLElement;
         if (el.dataset.id && !pngCacheRef.current.has(el.dataset.id)) {
-          cachePngForSvgIcon(el);
+          scheduleCachePng(el);
         }
       });
       isApplyingHistoryRef.current = false;
@@ -985,7 +1002,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       icons.forEach((icon) => {
         const el = icon as HTMLElement;
         if (el.dataset.id && !pngCacheRef.current.has(el.dataset.id)) {
-          cachePngForSvgIcon(el);
+          scheduleCachePng(el);
         }
       });
     };
@@ -994,6 +1011,28 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     return () => clearTimeout(timerId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingDocument, isLoadingDocument]);
+
+  // Cancel any pending PNG-cache flush on unmount so we don't leak the
+  // queue map or run an idle callback against a torn-down component.
+  useEffect(() => {
+    const queueRef = pngCacheQueueRef;
+    const scheduledRef = pngCacheScheduledRef;
+    return () => {
+      const handle = scheduledRef.current;
+      if (handle !== null) {
+        const w = window as Window & {
+          cancelIdleCallback?: (h: number) => void;
+        };
+        if (typeof w.cancelIdleCallback === "function") {
+          w.cancelIdleCallback(handle);
+        } else {
+          window.clearTimeout(handle);
+        }
+        scheduledRef.current = null;
+      }
+      queueRef.current.clear();
+    };
+  }, []);
 
   useEffect(() => {
     if (!isFullScreen) {
@@ -2573,6 +2612,26 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         performRedo();
         return;
       }
+
+      if (key === "a") {
+        // Native Ctrl+A in this editor occasionally fails to highlight the
+        // very first child — most often the first glyph — because the
+        // leading `data-selection-boundary` ZWSP span anchors the range's
+        // start *inside* its text node, and the browser's atom-highlight
+        // pass starts after that anchor. Take over and set the range
+        // explicitly to span editor:0 → editor:childNodes.length so every
+        // top-level child (including the first glyph) is in the range.
+        e.preventDefault();
+        const sel = window.getSelection();
+        if (sel) {
+          const range = document.createRange();
+          range.selectNodeContents(editor);
+          sel.removeAllRanges();
+          sel.addRange(range);
+          savedRangeRef.current = range.cloneRange();
+        }
+        return;
+      }
     }
 
     const selectionInfo = getSelectionInEditor(editor);
@@ -3332,15 +3391,13 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
         const clone = slot.firstElementChild as HTMLElement | null;
         if (clone) {
-          clone.style.width = `${w}px`;
-          clone.style.height = `${h}px`;
-          const svg = clone.querySelector("svg") as SVGElement | null;
-          if (svg) {
-            svg.removeAttribute("width");
-            svg.removeAttribute("height");
-            (svg.style as CSSStyleDeclaration).width = `${w}px`;
-            (svg.style as CSSStyleDeclaration).height = `${h}px`;
-          }
+          // Use the same fitter as creation/relayout so cartouche clones
+          // are uniformly scaled (transform: scale on the original-sized
+          // cartouche) instead of having their outer width/height clipped
+          // while the absolutely-positioned inner glyphs stay anchored to
+          // the old cartouche dimensions — that's what made cartouches in
+          // merged groups collapse into the top-left corner on size change.
+          fitCloneIntoSlot(clone, w, h);
         }
       });
       return;
@@ -3404,7 +3461,11 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         shadingOverlay.setAttribute("viewBox", `0 0 ${dW} ${dH}`);
       }
 
-      cachePngForSvgIcon(el);
+      // Defer the PNG re-cache so a "select all + change size" doesn't try
+      // to allocate one big oversampled canvas + run a synchronous PNG
+      // encode for every icon back-to-back. Copy/paste falls back to the
+      // SVG data URI if the PNG isn't ready yet.
+      scheduleCachePng(el);
 
       if (el.dataset.cartouche === "true") {
         const innerSvgs = el.querySelectorAll(
@@ -3604,7 +3665,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       wrapper.style.opacity = "1";
     };
 
-    cachePngForSvgIcon(wrapper);
+    scheduleCachePng(wrapper);
 
     return wrapper;
   };
@@ -4239,6 +4300,89 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     });
   };
 
+  // Defer + chunk PNG re-caching so a single user action (e.g. global
+  // icon-size change applied to dozens of icons) doesn't allocate dozens
+  // of large canvases or run dozens of synchronous toDataURL encodes
+  // back-to-back. See pngCacheQueueRef for the rationale.
+  const PNG_FLUSH_CHUNK = 4;
+  const PNG_FLUSH_TIMEOUT_MS = 1500;
+
+  const flushPngCacheQueue = (deadline?: IdleDeadline) => {
+    pngCacheScheduledRef.current = null;
+    const editor = editorRef.current;
+    const queue = pngCacheQueueRef.current;
+    if (!editor || queue.size === 0) {
+      queue.clear();
+      return;
+    }
+
+    // Drop cache entries whose data-id is no longer present in the editor.
+    // Merge / relayout / cartouche-rebuild operations assign brand new ids,
+    // leaving the old PNG strings stranded in the Map forever. We only
+    // sweep occasionally to keep the cost bounded.
+    if (queue.size > 0 && pngCacheRef.current.size > 0) {
+      const liveIds = new Set<string>();
+      editor.querySelectorAll<HTMLElement>(".svg-icon").forEach((el) => {
+        if (el.dataset.id) liveIds.add(el.dataset.id);
+      });
+      pngCacheRef.current.forEach((_, id) => {
+        if (!liveIds.has(id)) pngCacheRef.current.delete(id);
+      });
+    }
+
+    let processed = 0;
+    const hasIdleBudget = () =>
+      deadline ? deadline.timeRemaining() > 4 : processed < PNG_FLUSH_CHUNK;
+
+    const iterator = queue.entries();
+    while (hasIdleBudget()) {
+      const next = iterator.next();
+      if (next.done) break;
+      const [id, el] = next.value;
+      queue.delete(id);
+      processed += 1;
+      // The wrapper may have been replaced (merge / relayout) since we
+      // queued it; only rasterize what's still in the live editor.
+      if (!editor.contains(el)) continue;
+      if (el.dataset.id !== id) continue;
+      cachePngForSvgIcon(el);
+    }
+
+    if (queue.size > 0) {
+      schedulePngFlush();
+    }
+  };
+
+  const schedulePngFlush = () => {
+    if (pngCacheScheduledRef.current !== null) return;
+    const w = window as Window & {
+      requestIdleCallback?: (
+        cb: (deadline: IdleDeadline) => void,
+        opts?: { timeout: number },
+      ) => number;
+    };
+    if (typeof w.requestIdleCallback === "function") {
+      pngCacheScheduledRef.current = w.requestIdleCallback(
+        flushPngCacheQueue,
+        { timeout: PNG_FLUSH_TIMEOUT_MS },
+      );
+    } else {
+      pngCacheScheduledRef.current = window.setTimeout(
+        () => flushPngCacheQueue(),
+        80,
+      );
+    }
+  };
+
+  // Public entry point for "I would like this icon's PNG cached eventually".
+  // Coalesces repeated calls per data-id so rapid size changes don't pile up.
+  const scheduleCachePng = (el: HTMLElement) => {
+    const id = el.dataset.id;
+    if (!id) return;
+    pngCacheQueueRef.current.set(id, el);
+    schedulePngFlush();
+  };
+
   const reconstructSvgIcon = (originalEl: HTMLElement): HTMLElement => {
     const clone = originalEl.cloneNode(true) as HTMLElement;
     clone.dataset.id = Math.random().toString(36).substr(2, 9);
@@ -4261,7 +4405,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         .toString(36)
         .substr(2, 9);
     });
-    cachePngForSvgIcon(clone);
+    scheduleCachePng(clone);
     return clone;
   };
 
@@ -4456,7 +4600,12 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     );
   };
 
-  const COPY_SCALE = 8;
+  // Oversampling factor when rasterizing SVGs to PNG for the copy clipboard.
+  // 4x is enough for ~Retina sharpness and keeps each canvas small enough
+  // that batch re-caching (e.g. on a global icon-size change) doesn't blow
+  // up RAM or stall on toDataURL. Bumping this back to 8 multiplies canvas
+  // memory and PNG-encoding time by ~4x per icon.
+  const COPY_SCALE = 4;
   const COPY_DPI = 96 * COPY_SCALE;
 
   const injectDpiIntoDataUrl = (dataUrl: string, dpi: number): string => {
@@ -5051,6 +5200,63 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     return !!el?.closest(".vertical-run");
   };
 
+  // Fit a cloned glyph into a merged-group slot of size (slotW × slotH).
+  //
+  // For a regular glyph the inner SVG is inherently scalable (uses
+  // viewBox + preserveAspectRatio), so we just resize the wrapper and
+  // the SVG element directly.
+  //
+  // Cartouches are different: their wrapper contains a frame SVG plus a
+  // separate `.cartouche-icons-container` whose inner glyph SVGs are
+  // absolutely sized in pixels. Resizing only the outer wrapper makes
+  // the inner glyphs poke out of the frame (they don't shrink with the
+  // wrapper). We instead keep the cartouche's natural dimensions and
+  // apply `transform: scale()` to the whole clone so the frame and its
+  // inner glyphs scale together, then center the scaled box inside the
+  // slot.
+  const fitCloneIntoSlot = (
+    clone: HTMLElement,
+    slotW: number,
+    slotH: number,
+  ) => {
+    const isCartouche = clone.dataset.cartouche === "true";
+    if (isCartouche) {
+      const origW = Number(clone.dataset.origWidth) || slotW;
+      const origH = Number(clone.dataset.origHeight) || slotH;
+      const safeOrigW = Math.max(1, origW);
+      const safeOrigH = Math.max(1, origH);
+      const scale = Math.min(slotW / safeOrigW, slotH / safeOrigH);
+      const scaledW = safeOrigW * scale;
+      const scaledH = safeOrigH * scale;
+      clone.style.cssText = `
+        position: absolute;
+        top: ${(slotH - scaledH) / 2}px;
+        left: ${(slotW - scaledW) / 2}px;
+        width: ${safeOrigW}px;
+        height: ${safeOrigH}px;
+        transform: scale(${scale});
+        transform-origin: top left;
+      `;
+      return;
+    }
+
+    clone.style.cssText = `
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: ${slotW}px;
+      height: ${slotH}px;
+    `;
+    const inner = clone.querySelector("svg") as SVGElement | null;
+    if (inner) {
+      inner.removeAttribute("width");
+      inner.removeAttribute("height");
+      (inner.style as CSSStyleDeclaration).width = `${slotW}px`;
+      (inner.style as CSSStyleDeclaration).height = `${slotH}px`;
+      inner.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    }
+  };
+
   const createMergedIcon = (
     icons: Element[],
     options?: { horizontal?: boolean },
@@ -5126,21 +5332,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
           `;
 
       const svgClone = icon.cloneNode(true) as HTMLElement;
-      svgClone.style.cssText = `
-          position: absolute;
-          top: 0;
-          left: 0;
-          width: ${w}px;
-          height: ${h}px;
-          `;
-      const inner = svgClone.querySelector("svg") as SVGElement | null;
-      if (inner) {
-        inner.removeAttribute("width");
-        inner.removeAttribute("height");
-        (inner.style as CSSStyleDeclaration).width = `${w}px`;
-        (inner.style as CSSStyleDeclaration).height = `${h}px`;
-        inner.setAttribute("preserveAspectRatio", "xMidYMid meet");
-      }
+      fitCloneIntoSlot(svgClone, w, h);
 
       svgSpan.appendChild(svgClone);
       mergedWrapper.appendChild(svgSpan);
@@ -5159,7 +5351,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       mergedWrapper.style.opacity = "1";
     };
 
-    cachePngForSvgIcon(mergedWrapper);
+    scheduleCachePng(mergedWrapper);
     return mergedWrapper;
   };
 
@@ -5225,19 +5417,11 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
       const inner = slot.firstElementChild as HTMLElement | null;
       if (inner) {
-        inner.style.width = `${dim.w}px`;
-        inner.style.height = `${dim.h}px`;
-        const innerSvg = inner.querySelector("svg") as SVGElement | null;
-        if (innerSvg) {
-          innerSvg.removeAttribute("width");
-          innerSvg.removeAttribute("height");
-          (innerSvg.style as CSSStyleDeclaration).width = `${dim.w}px`;
-          (innerSvg.style as CSSStyleDeclaration).height = `${dim.h}px`;
-        }
+        fitCloneIntoSlot(inner, dim.w, dim.h);
       }
     });
 
-    cachePngForSvgIcon(wrapper);
+    scheduleCachePng(wrapper);
     return true;
   };
 
@@ -5902,7 +6086,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     }
 
     scrollElementIntoView(mergedWrapper);
-    cachePngForSvgIcon(mergedWrapper);
+    scheduleCachePng(mergedWrapper);
     setShowMagicBox(false);
     setSelectedIcons([]);
     editor.focus();
@@ -6125,7 +6309,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     }
 
     scrollElementIntoView(cartoucheWrapper);
-    cachePngForSvgIcon(cartoucheWrapper);
+    scheduleCachePng(cartoucheWrapper);
     setSelectedIcons([]);
     editor.focus();
     resetTypingHistorySession();
@@ -6158,7 +6342,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     setSelectedSingleIcon(null);
     setSelectedIconHasShading(false);
     resetTypingHistorySession();
-    cachePngForSvgIcon(iconEl);
+    scheduleCachePng(iconEl);
     commitHistory("push");
   };
 
@@ -6377,7 +6561,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     }
 
     editor.focus();
-    cachePngForSvgIcon(wrapper);
+    scheduleCachePng(wrapper);
     commitHistory("push");
   };
 
@@ -6886,7 +7070,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     // Refocus editor
     editorRef.current?.focus();
     resetTypingHistorySession();
-    cachePngForSvgIcon(iconEl);
+    scheduleCachePng(iconEl);
     commitHistory("push");
   };
 
