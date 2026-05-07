@@ -1271,6 +1271,19 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
   }, []);
 
   const normalizeEditorArtifacts = useCallback((editor: HTMLElement) => {
+    // Strip browser-inserted placeholder <br> elements. Our editor only
+    // ever creates `<br data-editor-line-break="true">`; any plain <br>
+    // came from Chrome's contentEditable auto-fill — most often after a
+    // Backspace empties a leading text node, Chrome drops a placeholder
+    // <br> in to maintain the line. That ghost <br> renders as a visible
+    // empty line above the glyphs that none of our key handlers
+    // recognise as a line break, so the user can't delete it.
+    Array.from(editor.querySelectorAll("br")).forEach((br) => {
+      const el = br as HTMLElement;
+      if (el.dataset?.editorLineBreak === "true") return;
+      el.remove();
+    });
+
     // Hoist any line breaks / spacers that got trapped inside the hidden
     // selection-boundary span (e.g. if Enter was pressed with the caret inside
     // that span). They would otherwise be invisible and unreachable.
@@ -1517,7 +1530,28 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
           // spans, and leaving them in place causes the spacer
           // enforcement to keep adding fresh spacers on every input,
           // which manifests as "extra empty lines" the user can't
-          // delete cleanly.
+          // delete cleanly. Track whether the caret is currently
+          // anchored to one of those text nodes so we can re-anchor
+          // it onto the spacer instead of letting Chrome orphan it
+          // (an orphaned caret often triggers Chrome to insert a
+          // placeholder <br>, which would render as the very ghost
+          // empty line we're trying to prevent).
+          const sel = window.getSelection();
+          let caretWasInRemoved = false;
+          if (sel && sel.rangeCount > 0) {
+            const r0 = sel.getRangeAt(0);
+            if (
+              r0.collapsed &&
+              r0.startContainer.nodeType === Node.TEXT_NODE &&
+              segment.indexOf(r0.startContainer as ChildNode) >= 0 &&
+              r0.startContainer !== firstRealNode &&
+              (r0.startContainer.textContent || "").replace(/\u200B/g, "")
+                .length === 0
+            ) {
+              caretWasInRemoved = true;
+            }
+          }
+
           segment.forEach((n) => {
             if (n === firstRealNode) return;
             if (
@@ -1538,6 +1572,25 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
             keep.textContent = "\u200B";
           }
           editor.insertBefore(keep, firstRealNode);
+
+          if (caretWasInRemoved && sel) {
+            const spacerText = keep.firstChild as Node | null;
+            if (spacerText && spacerText.nodeType === Node.TEXT_NODE) {
+              try {
+                const r = document.createRange();
+                r.setStart(
+                  spacerText,
+                  (spacerText.textContent || "").length,
+                );
+                r.collapse(true);
+                sel.removeAllRanges();
+                sel.addRange(r);
+                savedRangeRef.current = r.cloneRange();
+              } catch {
+                // Best-effort caret restore.
+              }
+            }
+          }
         } else {
           spacers.forEach((s) => s.remove());
         }
