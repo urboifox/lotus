@@ -1279,11 +1279,55 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     // <br> in to maintain the line. That ghost <br> renders as a visible
     // empty line above the glyphs that none of our key handlers
     // recognise as a line break, so the user can't delete it.
-    Array.from(editor.querySelectorAll("br")).forEach((br) => {
-      const el = br as HTMLElement;
-      if (el.dataset?.editorLineBreak === "true") return;
-      el.remove();
-    });
+    //
+    // BUT — when the editor is *genuinely* empty (e.g. user selected all
+    // and deleted, or just cleared the doc), Chrome NEEDS that
+    // placeholder <br> to render a caret and accept input. Stripping it
+    // here would leave a node-less contentEditable that swallows clicks
+    // and key events until reload. So we only strip stray <br>s when the
+    // editor still has meaningful content surrounding them; if removing
+    // it would empty the editor, we keep one to keep the caret alive.
+    const hasMeaningfulContent = (): boolean => {
+      const walker = document.createTreeWalker(
+        editor,
+        NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+      );
+      let node: Node | null = walker.nextNode();
+      while (node) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          const el = node as HTMLElement;
+          if (el.tagName === "BR") {
+            node = walker.nextNode();
+            continue;
+          }
+          if (
+            el.dataset?.selectionBoundary === "true" ||
+            el.dataset?.editorLineSpacer === "true"
+          ) {
+            node = walker.nextNode();
+            continue;
+          }
+          // Any other element (svg-icon, image, line-break tag, etc.)
+          // is real content.
+          return true;
+        }
+        if (node.nodeType === Node.TEXT_NODE) {
+          if ((node.textContent || "").replace(/\u200B/g, "").length > 0) {
+            return true;
+          }
+        }
+        node = walker.nextNode();
+      }
+      return false;
+    };
+
+    if (hasMeaningfulContent()) {
+      Array.from(editor.querySelectorAll("br")).forEach((br) => {
+        const el = br as HTMLElement;
+        if (el.dataset?.editorLineBreak === "true") return;
+        el.remove();
+      });
+    }
 
     // Hoist any line breaks / spacers that got trapped inside the hidden
     // selection-boundary span (e.g. if Enter was pressed with the caret inside
@@ -4171,130 +4215,43 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
       const layout = iconEl.dataset.layout || "vertical";
       const maxComboW = Math.min(90, size);
-      const MAX_GROUP_H = 90;
 
-      const aspectRatios: number[] = slots.map((slot) => {
-        const svg = slot.querySelector("svg") as SVGSVGElement | null;
-        if (svg) {
-          const vb = svg.getAttribute("viewBox");
-          if (vb) {
-            const parts = vb.trim().split(/[\s,]+/);
-            const vbW = parseFloat(parts[2]) || 1;
-            const vbH = parseFloat(parts[3]) || 1;
-            return vbW / vbH;
-          }
-        }
-        return 1;
-      });
+      // Run through the shared `computeMergedLayout` helper so resize
+      // honours the same INTERNAL_GAP (and all other layout decisions)
+      // as creation/relayout. This block used to duplicate the math
+      // inline and silently dropped the gap, which made the spacing
+      // between grouped glyphs collapse to 0 every time the user
+      // changed the global icon size.
+      const sourceIcons = slots
+        .map((slot) => slot.firstElementChild as Element | null)
+        .filter((el): el is Element => !!el);
+      if (sourceIcons.length !== n) return;
 
-      let wrapperW: number;
-      let wrapperH: number;
-      let slotLayout: { w: number; h: number; left: number; top: number }[];
+      const layoutResult = computeMergedLayout(
+        sourceIcons,
+        layout === "horizontal",
+        size,
+      );
+      if (!layoutResult) return;
 
-      if (layout === "horizontal" && iconEl.dataset.mergeColumnBox === "true") {
-        const ref =
-          Number(iconEl.dataset.mergeColRef) ||
-          Number(iconEl.dataset.baseSize) ||
-          size;
-        const refSafe = ref > 0 ? ref : size;
-        const baseTw = Number(iconEl.dataset.mergeColTargetW);
-        const baseTh = Number(iconEl.dataset.mergeColTargetH);
-        const targetW = Math.round(
-          Math.min(
-            90,
-            Math.max(
-              12,
-              (Number.isFinite(baseTw) && baseTw > 0 ? baseTw : size) *
-                (size / refSafe),
-            ),
-          ),
-        );
-        const targetH = Math.round(
-          Math.min(
-            90,
-            Math.max(
-              12,
-              (Number.isFinite(baseTh) && baseTh > 0 ? baseTh : size) *
-                (size / refSafe),
-            ),
-          ),
-        );
+      const {
+        wrapperW,
+        wrapperH,
+        slotDims,
+        columnMergeTargetW,
+        columnMergeTargetH,
+      } = layoutResult;
+      const slotLayout = slotDims;
 
-        // Shrink-to-content height (no vertical whitespace) and never exceed current iconSize (size).
-        const heightCap = Math.min(90, size);
-        const desiredH = Math.min(targetH, heightCap);
-
-        const rawWidths = aspectRatios.map((ar) => desiredH * ar);
-        const totalW = rawWidths.reduce((s, w) => s + w, 0);
-        const scale = totalW > targetW ? targetW / totalW : 1;
-        const finalH = desiredH * scale;
-        const contentW = totalW * scale;
-        const offsetX = (targetW - contentW) / 2;
-        const offsetY = 0;
-
-        wrapperW = targetW;
-        wrapperH = Math.max(1, Math.round(finalH));
-
-        let cursor = offsetX;
-        slotLayout = rawWidths.map((rw) => {
-          const sw = rw * scale;
-          const dim = { w: sw, h: finalH, left: cursor, top: offsetY };
-          cursor += sw;
-          return dim;
-        });
-
-        iconEl.dataset.mergeColTargetW = String(targetW);
-        iconEl.dataset.mergeColTargetH = String(targetH);
+      if (
+        layout === "horizontal" &&
+        iconEl.dataset.mergeColumnBox === "true" &&
+        columnMergeTargetW !== null &&
+        columnMergeTargetH !== null
+      ) {
+        iconEl.dataset.mergeColTargetW = String(columnMergeTargetW);
+        iconEl.dataset.mergeColTargetH = String(columnMergeTargetH);
         iconEl.dataset.mergeColRef = String(size);
-      } else if (layout === "horizontal") {
-        const slotH = size;
-        const rawWidths = aspectRatios.map((ar) => slotH * ar);
-        const totalW = rawWidths.reduce((s, w) => s + w, 0);
-        const scale = totalW > maxComboW ? maxComboW / totalW : 1;
-        const finalH = slotH * scale;
-
-        wrapperW = Math.min(totalW, maxComboW);
-        wrapperH = finalH;
-
-        let cursor = 0;
-        slotLayout = rawWidths.map((rw) => {
-          const sw = rw * scale;
-          const dim = { w: sw, h: finalH, left: cursor, top: 0 };
-          cursor += sw;
-          return dim;
-        });
-      } else {
-        const slotH0 = size / n;
-        const rawWidths = aspectRatios.map((ar) => slotH0 * ar);
-        const maxRw = Math.max(...rawWidths, 1);
-        const wScale = maxRw > size ? size / maxRw : 1;
-        let slotH = slotH0 * wScale;
-        let scaledWidths = rawWidths.map((w) => w * wScale);
-        wrapperW = size;
-        wrapperH = n * slotH;
-
-        if (wrapperH > MAX_GROUP_H) {
-          const hScale = MAX_GROUP_H / wrapperH;
-          slotH *= hScale;
-          scaledWidths = scaledWidths.map((w) => w * hScale);
-          wrapperW = Math.min(Math.round(size * hScale), maxComboW);
-          wrapperH = MAX_GROUP_H;
-        }
-
-        slotLayout = scaledWidths.map((slotW, i) => ({
-          w: slotW,
-          h: slotH,
-          left: (wrapperW - slotW) / 2,
-          top: i * slotH,
-        }));
-
-        const minL = Math.min(...slotLayout.map((s) => s.left));
-        const maxR = Math.max(...slotLayout.map((s) => s.left + s.w));
-        const tightW = Math.max(1, Math.round(maxR - minL));
-        slotLayout.forEach((s) => {
-          s.left -= minL;
-        });
-        wrapperW = tightW;
       }
 
       iconEl.style.width = `${wrapperW}px`;
@@ -6004,8 +5961,10 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
     // Pixel gap between adjacent glyph slots. Keeps grouped glyphs
     // visibly separate (matching JSesh's grouped-quadrat spacing) instead
-    // of rendering them flush against each other.
-    const INTERNAL_GAP = 2;
+    // of rendering them flush against each other. Held in *screen* pixels —
+    // the gap is intentionally NOT scaled when slot content shrinks, so a
+    // cartouche stacked with a tall glyph still has a visible separator.
+    const INTERNAL_GAP = 6;
 
     let wrapperW: number;
     let wrapperH: number;
@@ -6075,21 +6034,29 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       const MAX_GROUP_H = 90;
       const aspectRatios = readAspectRatios();
 
-      const totalGapsH = (n - 1) * INTERNAL_GAP;
+      // Gap is held in *screen* pixels and is never scaled with content.
+      // Earlier the gap was multiplied by `wScale`/`hScale`, which made
+      // tall cartouches inside vertical groups end up with a sub-pixel
+      // gap to their neighbours (effectively touching).
+      const gapH = INTERNAL_GAP;
+      const totalGapsH = (n - 1) * gapH;
       const slotH0 = Math.max(1, (baseSize - totalGapsH) / n);
       const rawWidths = aspectRatios.map((ar) => slotH0 * ar);
       const maxRw = Math.max(...rawWidths, 1);
       const wScale = maxRw > baseSize ? baseSize / maxRw : 1;
       let slotH = slotH0 * wScale;
-      let gapH = INTERNAL_GAP * wScale;
       let scaledWidths = rawWidths.map((w) => w * wScale);
       wrapperW = baseSize;
-      wrapperH = n * slotH + (n - 1) * gapH;
+      wrapperH = n * slotH + totalGapsH;
 
       if (wrapperH > MAX_GROUP_H) {
-        const hScale = MAX_GROUP_H / wrapperH;
-        slotH *= hScale;
-        gapH *= hScale;
+        // Re-derive slotH so wrapperH fits MAX_GROUP_H, *with the gap
+        // preserved*. Without this guard, a very tall stack would push
+        // the slots into negative height — bail to a 1px floor in that
+        // pathological case.
+        const availForSlots = Math.max(1, MAX_GROUP_H - totalGapsH);
+        const hScale = availForSlots / (n * slotH);
+        slotH = Math.max(1, slotH * hScale);
         scaledWidths = scaledWidths.map((w) => w * hScale);
         wrapperW = Math.min(Math.round(baseSize * hScale), maxComboW);
         wrapperH = MAX_GROUP_H;
@@ -6240,7 +6207,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     mergedWrapper.style.cssText = `
         display: inline-block;
         cursor: text;
-        margin: 0 2px;
+        margin: 4px 3px;
         vertical-align: middle;
         position: relative;
         width: ${wrapperW}px;
