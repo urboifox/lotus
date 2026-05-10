@@ -4256,6 +4256,8 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
       iconEl.style.width = `${wrapperW}px`;
       iconEl.style.height = `${wrapperH}px`;
+      iconEl.dataset.origWidth = String(wrapperW);
+      iconEl.dataset.origHeight = String(wrapperH);
       if (layout === "horizontal" && iconEl.dataset.mergeColumnBox === "true") {
         iconEl.style.maxWidth = `${maxComboW}px`;
         iconEl.style.maxHeight = `${Math.min(90, size)}px`;
@@ -5975,6 +5977,40 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     const readAspectRatios = (): number[] =>
       icons.map((icon) => {
         const el = icon as HTMLElement;
+
+        // Composite atoms (merged groups, cartouches) own a wrapper-level
+        // size that the inner first-SVG doesn't reflect: a merged
+        // group's first <svg> is just one of its slot children, and a
+        // cartouche's first <svg> is the frame whose viewBox happens to
+        // match the wrapper but only because we set it that way. For
+        // both, the canonical aspect ratio lives on the wrapper itself
+        // (origWidth / origHeight for cartouches, the explicit
+        // style.width / style.height for merged groups). Falling back
+        // to the inner SVG here is what made nesting collapse — a
+        // group's first slot SVG is much smaller than the group's true
+        // wrapper, so the slot allocated to the nested group ended up
+        // tiny and the inner glyphs disappeared.
+        const isMerged = el.classList.contains("merged");
+        const isCartouche = el.dataset.cartouche === "true";
+
+        if (isMerged) {
+          const ow =
+            Number(el.dataset.origWidth) ||
+            parseFloat(el.style.width) ||
+            baseSize;
+          const oh =
+            Number(el.dataset.origHeight) ||
+            parseFloat(el.style.height) ||
+            baseSize;
+          return Math.max(0.0001, ow) / Math.max(0.0001, oh);
+        }
+
+        if (isCartouche) {
+          const ow = Number(el.dataset.origWidth) || baseSize;
+          const oh = Number(el.dataset.origHeight) || baseSize;
+          return Math.max(0.0001, ow) / Math.max(0.0001, oh);
+        }
+
         const svg = el.querySelector("svg") as SVGSVGElement | null;
         if (svg) {
           const vb = svg.getAttribute("viewBox");
@@ -6118,9 +6154,28 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     slotH: number,
   ) => {
     const isCartouche = clone.dataset.cartouche === "true";
-    if (isCartouche) {
-      const origW = Number(clone.dataset.origWidth) || slotW;
-      const origH = Number(clone.dataset.origHeight) || slotH;
+    const isMerged = clone.classList.contains("merged");
+
+    // Composite atoms (cartouches and merged groups) have absolutely-
+    // positioned children that are sized in pixels relative to the
+    // wrapper's *original* dimensions. Resizing only the outer wrapper
+    // doesn't reflow them — the inner glyphs stay anchored to the old
+    // size and either poke out of the new wrapper or get clipped to a
+    // sliver. Instead we keep the wrapper at its natural size and apply
+    // `transform: scale()` to the whole composite so the frame and its
+    // inner content scale together, then center the scaled box inside
+    // the slot. Same approach for both, only the source of "natural
+    // size" differs (origWidth/origHeight on cartouches; either the
+    // explicit data attrs or the wrapper's style for merged groups).
+    if (isCartouche || isMerged) {
+      const origW =
+        Number(clone.dataset.origWidth) ||
+        parseFloat(clone.style.width) ||
+        slotW;
+      const origH =
+        Number(clone.dataset.origHeight) ||
+        parseFloat(clone.style.height) ||
+        slotH;
       const safeOrigW = Math.max(1, origW);
       const safeOrigH = Math.max(1, origH);
       const scale = Math.min(slotW / safeOrigW, slotH / safeOrigH);
@@ -6193,6 +6248,12 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     mergedWrapper.dataset.id = Math.random().toString(36).substr(2, 9);
     mergedWrapper.dataset.baseSize = String(iconSize);
     mergedWrapper.dataset.layout = horizontal ? "horizontal" : "vertical";
+    // Stash the natural dimensions so that nesting this group inside
+    // another group (or fitting it into a parent slot after a resize)
+    // can scale the whole composite uniformly via `fitCloneIntoSlot`,
+    // the same way cartouches do.
+    mergedWrapper.dataset.origWidth = String(wrapperW);
+    mergedWrapper.dataset.origHeight = String(wrapperH);
     if (
       horizontal &&
       columnMergeTargetW !== null &&
@@ -6288,6 +6349,8 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     wrapper.style.width = `${wrapperW}px`;
     wrapper.style.height = `${wrapperH}px`;
     wrapper.dataset.layout = horizontal ? "horizontal" : "vertical";
+    wrapper.dataset.origWidth = String(wrapperW);
+    wrapper.dataset.origHeight = String(wrapperH);
 
     if (
       horizontal &&
