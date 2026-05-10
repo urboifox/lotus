@@ -15,6 +15,7 @@ import { useLocation } from "react-router-dom";
 import EditorActions from "./EditorActions";
 import ShadingPatterns from "./ShadingPatterns";
 import MagicBox from "./MagicBox";
+import type { CartoucheShape } from "./CartouchePicker";
 import { SubscriptionPlansModal } from "@/components/payment/SubscriptionPlansModal";
 
 interface LocationState {
@@ -3329,10 +3330,21 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     }
   };
 
+  // Read the cartouche shape persisted on a wrapper. Falls back to "oval"
+  // for any wrapper created before the shape feature shipped (those have
+  // no `data-cartouche-shape` attribute), so legacy documents continue to
+  // re-render as the original Egyptian cartouche on resize / vertical-flip.
+  const getCartoucheShape = (el: HTMLElement): CartoucheShape => {
+    const raw = el.dataset.cartoucheShape;
+    if (raw === "oval") return raw;
+    return "oval";
+  };
+
   const buildCartoucheSvg = (
     W: number,
     H: number,
     vertical = false,
+    shape: CartoucheShape = "oval",
   ): SVGSVGElement => {
     const svgNS = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(svgNS, "svg");
@@ -3344,104 +3356,648 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     const strokeStyle = "fill:none;stroke:#000000;stroke-width:1";
     const barStyle = "fill:none;stroke:#000000;stroke-width:1.5";
 
-    if (vertical) {
-      const pad = W * 0.0208;
-      const curveAnchor = W * 0.4167;
-      const ctrlExtend = W * 0.1181;
+    // The "oval" shape draws the classic Egyptian cartouche: two flat
+    // sides with semi-circular end caps and a single perpendicular bar
+    // at the terminating end. The "rectangle" and "rounded" shapes share
+    // the same end-bar but use a (rounded) rectangle for the frame, so
+    // we route them through a shared path below.
+    if (shape === "oval") {
+      if (vertical) {
+        const pad = W * 0.0208;
+        const curveAnchor = W * 0.4167;
+        const ctrlExtend = W * 0.1181;
 
-      const topAnchorY = Math.min(curveAnchor, H / 2);
-      const bottomAnchorY = Math.max(H - curveAnchor, H / 2);
-      const xLeft = pad;
-      const xRight = W - pad;
+        const topAnchorY = Math.min(curveAnchor, H / 2);
+        const bottomAnchorY = Math.max(H - curveAnchor, H / 2);
+        const xLeft = pad;
+        const xRight = W - pad;
 
-      const topCurve = document.createElementNS(svgNS, "path");
-      topCurve.setAttribute(
-        "d",
-        `M ${xLeft} ${topAnchorY} C ${xLeft} ${-ctrlExtend} ${xRight} ${-ctrlExtend} ${xRight} ${topAnchorY}`,
-      );
-      topCurve.setAttribute("style", strokeStyle);
-      svg.appendChild(topCurve);
-
-      const bottomCurve = document.createElementNS(svgNS, "path");
-      bottomCurve.setAttribute(
-        "d",
-        `M ${xLeft} ${bottomAnchorY} C ${xLeft} ${H + ctrlExtend} ${xRight} ${H + ctrlExtend} ${xRight} ${bottomAnchorY}`,
-      );
-      bottomCurve.setAttribute("style", strokeStyle);
-      svg.appendChild(bottomCurve);
-
-      if (bottomAnchorY > topAnchorY + 0.5) {
-        const leftLine = document.createElementNS(svgNS, "path");
-        leftLine.setAttribute(
+        const topCurve = document.createElementNS(svgNS, "path");
+        topCurve.setAttribute(
           "d",
-          `M ${xLeft} ${topAnchorY} L ${xLeft} ${bottomAnchorY}`,
+          `M ${xLeft} ${topAnchorY} C ${xLeft} ${-ctrlExtend} ${xRight} ${-ctrlExtend} ${xRight} ${topAnchorY}`,
         );
-        leftLine.setAttribute("style", strokeStyle);
-        svg.appendChild(leftLine);
+        topCurve.setAttribute("style", strokeStyle);
+        svg.appendChild(topCurve);
 
-        const rightLine = document.createElementNS(svgNS, "path");
-        rightLine.setAttribute(
+        const bottomCurve = document.createElementNS(svgNS, "path");
+        bottomCurve.setAttribute(
           "d",
-          `M ${xRight} ${topAnchorY} L ${xRight} ${bottomAnchorY}`,
+          `M ${xLeft} ${bottomAnchorY} C ${xLeft} ${H + ctrlExtend} ${xRight} ${H + ctrlExtend} ${xRight} ${bottomAnchorY}`,
         );
-        rightLine.setAttribute("style", strokeStyle);
-        svg.appendChild(rightLine);
+        bottomCurve.setAttribute("style", strokeStyle);
+        svg.appendChild(bottomCurve);
+
+        if (bottomAnchorY > topAnchorY + 0.5) {
+          const leftLine = document.createElementNS(svgNS, "path");
+          leftLine.setAttribute(
+            "d",
+            `M ${xLeft} ${topAnchorY} L ${xLeft} ${bottomAnchorY}`,
+          );
+          leftLine.setAttribute("style", strokeStyle);
+          svg.appendChild(leftLine);
+
+          const rightLine = document.createElementNS(svgNS, "path");
+          rightLine.setAttribute(
+            "d",
+            `M ${xRight} ${topAnchorY} L ${xRight} ${bottomAnchorY}`,
+          );
+          rightLine.setAttribute("style", strokeStyle);
+          svg.appendChild(rightLine);
+        }
+
+        const barY = H - Math.max(1, W * 0.03);
+        const endBar = document.createElementNS(svgNS, "path");
+        endBar.setAttribute("d", `M ${xLeft} ${barY} L ${xRight} ${barY}`);
+        endBar.setAttribute("style", barStyle);
+        svg.appendChild(endBar);
+      } else {
+        const pad = H * 0.0208;
+        const curveAnchor = H * 0.4167;
+        const ctrlExtend = H * 0.1181;
+
+        const leftAnchorX = Math.min(curveAnchor, W / 2);
+        const rightAnchorX = Math.max(W - curveAnchor, W / 2);
+        const yTop = pad;
+        const yBot = H - pad;
+
+        const leftCurve = document.createElementNS(svgNS, "path");
+        leftCurve.setAttribute(
+          "d",
+          `M ${leftAnchorX} ${yTop} C ${-ctrlExtend} ${yTop} ${-ctrlExtend} ${yBot} ${leftAnchorX} ${yBot}`,
+        );
+        leftCurve.setAttribute("style", strokeStyle);
+        svg.appendChild(leftCurve);
+
+        const rightCurve = document.createElementNS(svgNS, "path");
+        rightCurve.setAttribute(
+          "d",
+          `M ${rightAnchorX} ${yTop} C ${W + ctrlExtend} ${yTop} ${W + ctrlExtend} ${yBot} ${rightAnchorX} ${yBot}`,
+        );
+        rightCurve.setAttribute("style", strokeStyle);
+        svg.appendChild(rightCurve);
+
+        if (rightAnchorX > leftAnchorX + 0.5) {
+          const topLine = document.createElementNS(svgNS, "path");
+          topLine.setAttribute(
+            "d",
+            `M ${leftAnchorX} ${yTop} L ${rightAnchorX} ${yTop}`,
+          );
+          topLine.setAttribute("style", strokeStyle);
+          svg.appendChild(topLine);
+
+          const bottomLine = document.createElementNS(svgNS, "path");
+          bottomLine.setAttribute(
+            "d",
+            `M ${leftAnchorX} ${yBot} L ${rightAnchorX} ${yBot}`,
+          );
+          bottomLine.setAttribute("style", strokeStyle);
+          svg.appendChild(bottomLine);
+        }
+
+        const barX = W - Math.max(1, H * 0.03);
+        const endBar = document.createElementNS(svgNS, "path");
+        endBar.setAttribute("d", `M ${barX} ${yTop} L ${barX} ${yBot}`);
+        endBar.setAttribute("style", barStyle);
+        svg.appendChild(endBar);
       }
+    } else if (shape === "hwt") {
+      // Hwt — port of jsesh's HwtDrawer. Flat-sided rectangular frame
+      // with a small "knot" square inset at each cap corner, marking
+      // the enclosure as a sacred / temple boundary. Geometry is
+      // symmetric in both orientations: caps at the start and end,
+      // body fills the middle.
+      const refPerp = vertical ? W : H;
+      const refLong = vertical ? H : W;
+      const capLen = Math.max(2, refPerp * 0.12);
+      // Inset square dimension (jsesh's `getHwtSquareSize`). Drawn at
+      // the inside corners of each cap.
+      const knot = Math.max(1.5, refPerp * 0.18);
 
-      const barY = H - Math.max(1, W * 0.03);
-      const endBar = document.createElementNS(svgNS, "path");
-      endBar.setAttribute("d", `M ${xLeft} ${barY} L ${xRight} ${barY}`);
-      endBar.setAttribute("style", barStyle);
-      svg.appendChild(endBar);
+      if (vertical) {
+        const xLeft = 0.5;
+        const xRight = W - 0.5;
+        const yTop = 0.5;
+        const yBot = H - 0.5;
+        const yStartCap = capLen;
+        const yEndCap = H - capLen;
+
+        // Body: two long verticals running the inner length.
+        const left = document.createElementNS(svgNS, "path");
+        left.setAttribute(
+          "d",
+          `M ${xLeft} ${yStartCap} L ${xLeft} ${yEndCap}`,
+        );
+        left.setAttribute("style", strokeStyle);
+        svg.appendChild(left);
+        const right = document.createElementNS(svgNS, "path");
+        right.setAttribute(
+          "d",
+          `M ${xRight} ${yStartCap} L ${xRight} ${yEndCap}`,
+        );
+        right.setAttribute("style", strokeStyle);
+        svg.appendChild(right);
+
+        // Start cap (top). Flat top + two side joins + a knot square
+        // tucked into the bottom-left inner corner of the cap.
+        const top = document.createElementNS(svgNS, "path");
+        top.setAttribute("d", `M ${xLeft} ${yTop} L ${xRight} ${yTop}`);
+        top.setAttribute("style", strokeStyle);
+        svg.appendChild(top);
+        const topL = document.createElementNS(svgNS, "path");
+        topL.setAttribute(
+          "d",
+          `M ${xLeft} ${yTop} L ${xLeft} ${yStartCap}`,
+        );
+        topL.setAttribute("style", strokeStyle);
+        svg.appendChild(topL);
+        const topR = document.createElementNS(svgNS, "path");
+        topR.setAttribute(
+          "d",
+          `M ${xRight} ${yTop} L ${xRight} ${yStartCap}`,
+        );
+        topR.setAttribute("style", strokeStyle);
+        svg.appendChild(topR);
+        const knotTop = document.createElementNS(svgNS, "path");
+        knotTop.setAttribute(
+          "d",
+          `M ${xLeft} ${yStartCap - knot} L ${xLeft + knot} ${yStartCap - knot} L ${xLeft + knot} ${yStartCap}`,
+        );
+        knotTop.setAttribute("style", strokeStyle);
+        svg.appendChild(knotTop);
+
+        // End cap (bottom).
+        const bot = document.createElementNS(svgNS, "path");
+        bot.setAttribute("d", `M ${xLeft} ${yBot} L ${xRight} ${yBot}`);
+        bot.setAttribute("style", strokeStyle);
+        svg.appendChild(bot);
+        const botL = document.createElementNS(svgNS, "path");
+        botL.setAttribute("d", `M ${xLeft} ${yEndCap} L ${xLeft} ${yBot}`);
+        botL.setAttribute("style", strokeStyle);
+        svg.appendChild(botL);
+        const botR = document.createElementNS(svgNS, "path");
+        botR.setAttribute(
+          "d",
+          `M ${xRight} ${yEndCap} L ${xRight} ${yBot}`,
+        );
+        botR.setAttribute("style", strokeStyle);
+        svg.appendChild(botR);
+        const knotBot = document.createElementNS(svgNS, "path");
+        knotBot.setAttribute(
+          "d",
+          `M ${xLeft + knot} ${yEndCap} L ${xLeft + knot} ${yEndCap + knot} L ${xLeft} ${yEndCap + knot}`,
+        );
+        knotBot.setAttribute("style", strokeStyle);
+        svg.appendChild(knotBot);
+      } else {
+        const yTop = 0.5;
+        const yBot = H - 0.5;
+        const xLeft = 0.5;
+        const xRight = W - 0.5;
+        const xStartCap = capLen;
+        const xEndCap = W - capLen;
+
+        // Body: two long horizontals running the inner length.
+        const top = document.createElementNS(svgNS, "path");
+        top.setAttribute(
+          "d",
+          `M ${xStartCap} ${yTop} L ${xEndCap} ${yTop}`,
+        );
+        top.setAttribute("style", strokeStyle);
+        svg.appendChild(top);
+        const bot = document.createElementNS(svgNS, "path");
+        bot.setAttribute(
+          "d",
+          `M ${xStartCap} ${yBot} L ${xEndCap} ${yBot}`,
+        );
+        bot.setAttribute("style", strokeStyle);
+        svg.appendChild(bot);
+
+        // Start cap (left). Flat left side + two top/bottom joins + a
+        // knot square at the bottom-inner corner of the cap.
+        const leftCap = document.createElementNS(svgNS, "path");
+        leftCap.setAttribute("d", `M ${xLeft} ${yTop} L ${xLeft} ${yBot}`);
+        leftCap.setAttribute("style", strokeStyle);
+        svg.appendChild(leftCap);
+        const leftTop = document.createElementNS(svgNS, "path");
+        leftTop.setAttribute(
+          "d",
+          `M ${xLeft} ${yTop} L ${xStartCap} ${yTop}`,
+        );
+        leftTop.setAttribute("style", strokeStyle);
+        svg.appendChild(leftTop);
+        const leftBot = document.createElementNS(svgNS, "path");
+        leftBot.setAttribute(
+          "d",
+          `M ${xLeft} ${yBot} L ${xStartCap} ${yBot}`,
+        );
+        leftBot.setAttribute("style", strokeStyle);
+        svg.appendChild(leftBot);
+        const knotLeft = document.createElementNS(svgNS, "path");
+        knotLeft.setAttribute(
+          "d",
+          `M ${xStartCap - knot} ${yBot} L ${xStartCap - knot} ${yBot - knot} L ${xStartCap} ${yBot - knot}`,
+        );
+        knotLeft.setAttribute("style", strokeStyle);
+        svg.appendChild(knotLeft);
+
+        // End cap (right).
+        const rightCap = document.createElementNS(svgNS, "path");
+        rightCap.setAttribute(
+          "d",
+          `M ${xRight} ${yTop} L ${xRight} ${yBot}`,
+        );
+        rightCap.setAttribute("style", strokeStyle);
+        svg.appendChild(rightCap);
+        const rightTop = document.createElementNS(svgNS, "path");
+        rightTop.setAttribute(
+          "d",
+          `M ${xEndCap} ${yTop} L ${xRight} ${yTop}`,
+        );
+        rightTop.setAttribute("style", strokeStyle);
+        svg.appendChild(rightTop);
+        const rightBot = document.createElementNS(svgNS, "path");
+        rightBot.setAttribute(
+          "d",
+          `M ${xEndCap} ${yBot} L ${xRight} ${yBot}`,
+        );
+        rightBot.setAttribute("style", strokeStyle);
+        svg.appendChild(rightBot);
+        const knotRight = document.createElementNS(svgNS, "path");
+        knotRight.setAttribute(
+          "d",
+          `M ${xEndCap} ${yBot - knot} L ${xEndCap + knot} ${yBot - knot} L ${xEndCap + knot} ${yBot}`,
+        );
+        knotRight.setAttribute("style", strokeStyle);
+        svg.appendChild(knotRight);
+      }
+      // Mark refLong as used (the cap length is derived from refPerp; we
+      // keep refLong for symmetry with the other shapes' geometry blocks).
+      void refLong;
+    } else if (shape === "serekh") {
+      // Serekh — port of jsesh's SerekhDrawer. The "name" end of the
+      // frame is a Hwt-style flat cap; the OPPOSITE end is a stylized
+      // palace facade with cornice lines and rectangular recesses.
+      // The palace side is always at the START of the frame in our
+      // local coordinate space — RTL flipping is handled by the
+      // wrapper's outer scaleX(-1) transform, so we don't mirror here.
+      const refPerp = vertical ? W : H;
+      const fineStyle = "fill:none;stroke:#000000;stroke-width:0.6";
+      const facadeLen = Math.max(8, refPerp * 0.55);
+      const hwtCapLen = Math.max(2, refPerp * 0.12);
+      const hwtKnot = Math.max(1.5, refPerp * 0.18);
+
+      if (vertical) {
+        const xLeft = 0.5;
+        const xRight = W - 0.5;
+        const yTop = 0.5;
+        const yBot = H - 0.5;
+        const yFacadeEnd = facadeLen;
+        const yHwtStart = H - hwtCapLen;
+
+        // Body sides (between the palace facade end and the Hwt cap).
+        const left = document.createElementNS(svgNS, "path");
+        left.setAttribute(
+          "d",
+          `M ${xLeft} ${yFacadeEnd} L ${xLeft} ${yHwtStart}`,
+        );
+        left.setAttribute("style", strokeStyle);
+        svg.appendChild(left);
+        const right = document.createElementNS(svgNS, "path");
+        right.setAttribute(
+          "d",
+          `M ${xRight} ${yFacadeEnd} L ${xRight} ${yHwtStart}`,
+        );
+        right.setAttribute("style", strokeStyle);
+        svg.appendChild(right);
+
+        // --- Palace facade (start cap, top) ---
+        // Outer top + side joins.
+        const facadeTop = document.createElementNS(svgNS, "path");
+        facadeTop.setAttribute(
+          "d",
+          `M ${xLeft} ${yTop} L ${xRight} ${yTop}`,
+        );
+        facadeTop.setAttribute("style", strokeStyle);
+        svg.appendChild(facadeTop);
+        const facadeL = document.createElementNS(svgNS, "path");
+        facadeL.setAttribute(
+          "d",
+          `M ${xLeft} ${yTop} L ${xLeft} ${yFacadeEnd}`,
+        );
+        facadeL.setAttribute("style", strokeStyle);
+        svg.appendChild(facadeL);
+        const facadeR = document.createElementNS(svgNS, "path");
+        facadeR.setAttribute(
+          "d",
+          `M ${xRight} ${yTop} L ${xRight} ${yFacadeEnd}`,
+        );
+        facadeR.setAttribute("style", strokeStyle);
+        svg.appendChild(facadeR);
+
+        // Three cornice lines across the facade (jsesh uses 0.1, 0.3,
+        // 0.4 of the facade length — first is bold, others fine).
+        const dy = yFacadeEnd - yTop;
+        const cornice1 = document.createElementNS(svgNS, "path");
+        const c1y = yTop + dy * 0.1;
+        cornice1.setAttribute(
+          "d",
+          `M ${xLeft} ${c1y} L ${xRight} ${c1y}`,
+        );
+        cornice1.setAttribute("style", strokeStyle);
+        svg.appendChild(cornice1);
+        const cornice2 = document.createElementNS(svgNS, "path");
+        const c2y = yTop + dy * 0.3;
+        cornice2.setAttribute(
+          "d",
+          `M ${xLeft} ${c2y} L ${xRight} ${c2y}`,
+        );
+        cornice2.setAttribute("style", fineStyle);
+        svg.appendChild(cornice2);
+        const cornice3 = document.createElementNS(svgNS, "path");
+        const c3y = yTop + dy * 0.4;
+        cornice3.setAttribute(
+          "d",
+          `M ${xLeft} ${c3y} L ${xRight} ${c3y}`,
+        );
+        cornice3.setAttribute("style", fineStyle);
+        svg.appendChild(cornice3);
+
+        // Recesses: 3 bands across the facade body, each with an inner
+        // notch. JSesh iterates i=1..10 step 3 over a 10-band split.
+        const recessY = yTop + dy * 0.5;
+        const recessSpan = yFacadeEnd - recessY;
+        const dx = xRight - xLeft;
+        for (let i = 1; i < 10; i += 3) {
+          const x1 = xLeft + 0.1 * dx * i;
+          const x2 = xLeft + 0.1 * dx * (i + 1);
+          const x3 = xLeft + 0.1 * dx * (i + 2);
+          const recess = document.createElementNS(svgNS, "path");
+          recess.setAttribute(
+            "d",
+            `M ${x1} ${yFacadeEnd} L ${x1} ${recessY} L ${x3} ${recessY} L ${x3} ${yFacadeEnd}`,
+          );
+          recess.setAttribute("style", fineStyle);
+          svg.appendChild(recess);
+          const innerY = recessY + 0.2 * recessSpan;
+          const inner = document.createElementNS(svgNS, "path");
+          inner.setAttribute(
+            "d",
+            `M ${x2} ${innerY} L ${x2} ${yFacadeEnd}`,
+          );
+          inner.setAttribute("style", fineStyle);
+          svg.appendChild(inner);
+        }
+
+        // --- Hwt-style end cap (bottom) ---
+        const bot = document.createElementNS(svgNS, "path");
+        bot.setAttribute("d", `M ${xLeft} ${yBot} L ${xRight} ${yBot}`);
+        bot.setAttribute("style", strokeStyle);
+        svg.appendChild(bot);
+        const botL = document.createElementNS(svgNS, "path");
+        botL.setAttribute(
+          "d",
+          `M ${xLeft} ${yHwtStart} L ${xLeft} ${yBot}`,
+        );
+        botL.setAttribute("style", strokeStyle);
+        svg.appendChild(botL);
+        const botR = document.createElementNS(svgNS, "path");
+        botR.setAttribute(
+          "d",
+          `M ${xRight} ${yHwtStart} L ${xRight} ${yBot}`,
+        );
+        botR.setAttribute("style", strokeStyle);
+        svg.appendChild(botR);
+        const knot = document.createElementNS(svgNS, "path");
+        knot.setAttribute(
+          "d",
+          `M ${xLeft + hwtKnot} ${yHwtStart} L ${xLeft + hwtKnot} ${yHwtStart + hwtKnot} L ${xLeft} ${yHwtStart + hwtKnot}`,
+        );
+        knot.setAttribute("style", strokeStyle);
+        svg.appendChild(knot);
+      } else {
+        const yTop = 0.5;
+        const yBot = H - 0.5;
+        const xLeft = 0.5;
+        const xRight = W - 0.5;
+        const xFacadeEnd = facadeLen;
+        const xHwtStart = W - hwtCapLen;
+
+        // Body top / bottom (between palace facade and Hwt cap).
+        const top = document.createElementNS(svgNS, "path");
+        top.setAttribute(
+          "d",
+          `M ${xFacadeEnd} ${yTop} L ${xHwtStart} ${yTop}`,
+        );
+        top.setAttribute("style", strokeStyle);
+        svg.appendChild(top);
+        const bot = document.createElementNS(svgNS, "path");
+        bot.setAttribute(
+          "d",
+          `M ${xFacadeEnd} ${yBot} L ${xHwtStart} ${yBot}`,
+        );
+        bot.setAttribute("style", strokeStyle);
+        svg.appendChild(bot);
+
+        // --- Palace facade (start cap, left) ---
+        const facadeL = document.createElementNS(svgNS, "path");
+        facadeL.setAttribute(
+          "d",
+          `M ${xLeft} ${yTop} L ${xLeft} ${yBot}`,
+        );
+        facadeL.setAttribute("style", strokeStyle);
+        svg.appendChild(facadeL);
+        const facadeT = document.createElementNS(svgNS, "path");
+        facadeT.setAttribute(
+          "d",
+          `M ${xLeft} ${yTop} L ${xFacadeEnd} ${yTop}`,
+        );
+        facadeT.setAttribute("style", strokeStyle);
+        svg.appendChild(facadeT);
+        const facadeB = document.createElementNS(svgNS, "path");
+        facadeB.setAttribute(
+          "d",
+          `M ${xLeft} ${yBot} L ${xFacadeEnd} ${yBot}`,
+        );
+        facadeB.setAttribute("style", strokeStyle);
+        svg.appendChild(facadeB);
+
+        const dx = xFacadeEnd - xLeft;
+        const cornice1 = document.createElementNS(svgNS, "path");
+        const c1x = xLeft + dx * 0.1;
+        cornice1.setAttribute(
+          "d",
+          `M ${c1x} ${yTop} L ${c1x} ${yBot}`,
+        );
+        cornice1.setAttribute("style", strokeStyle);
+        svg.appendChild(cornice1);
+        const cornice2 = document.createElementNS(svgNS, "path");
+        const c2x = xLeft + dx * 0.3;
+        cornice2.setAttribute(
+          "d",
+          `M ${c2x} ${yTop} L ${c2x} ${yBot}`,
+        );
+        cornice2.setAttribute("style", fineStyle);
+        svg.appendChild(cornice2);
+        const cornice3 = document.createElementNS(svgNS, "path");
+        const c3x = xLeft + dx * 0.4;
+        cornice3.setAttribute(
+          "d",
+          `M ${c3x} ${yTop} L ${c3x} ${yBot}`,
+        );
+        cornice3.setAttribute("style", fineStyle);
+        svg.appendChild(cornice3);
+
+        const recessX = xLeft + dx * 0.5;
+        const recessSpan = xFacadeEnd - recessX;
+        const dy = yBot - yTop;
+        for (let i = 1; i < 10; i += 3) {
+          const y1 = yTop + 0.1 * dy * i;
+          const y2 = yTop + 0.1 * dy * (i + 1);
+          const y3 = yTop + 0.1 * dy * (i + 2);
+          const recess = document.createElementNS(svgNS, "path");
+          recess.setAttribute(
+            "d",
+            `M ${xFacadeEnd} ${y1} L ${recessX} ${y1} L ${recessX} ${y3} L ${xFacadeEnd} ${y3}`,
+          );
+          recess.setAttribute("style", fineStyle);
+          svg.appendChild(recess);
+          const innerX = recessX + 0.2 * recessSpan;
+          const inner = document.createElementNS(svgNS, "path");
+          inner.setAttribute(
+            "d",
+            `M ${innerX} ${y2} L ${xFacadeEnd} ${y2}`,
+          );
+          inner.setAttribute("style", fineStyle);
+          svg.appendChild(inner);
+        }
+
+        // --- Hwt-style end cap (right) ---
+        const rightCap = document.createElementNS(svgNS, "path");
+        rightCap.setAttribute(
+          "d",
+          `M ${xRight} ${yTop} L ${xRight} ${yBot}`,
+        );
+        rightCap.setAttribute("style", strokeStyle);
+        svg.appendChild(rightCap);
+        const rightTop = document.createElementNS(svgNS, "path");
+        rightTop.setAttribute(
+          "d",
+          `M ${xHwtStart} ${yTop} L ${xRight} ${yTop}`,
+        );
+        rightTop.setAttribute("style", strokeStyle);
+        svg.appendChild(rightTop);
+        const rightBot = document.createElementNS(svgNS, "path");
+        rightBot.setAttribute(
+          "d",
+          `M ${xHwtStart} ${yBot} L ${xRight} ${yBot}`,
+        );
+        rightBot.setAttribute("style", strokeStyle);
+        svg.appendChild(rightBot);
+        const knot = document.createElementNS(svgNS, "path");
+        knot.setAttribute(
+          "d",
+          `M ${xHwtStart} ${yBot - hwtKnot} L ${xHwtStart + hwtKnot} ${yBot - hwtKnot} L ${xHwtStart + hwtKnot} ${yBot}`,
+        );
+        knot.setAttribute("style", strokeStyle);
+        svg.appendChild(knot);
+      }
     } else {
-      const pad = H * 0.0208;
-      const curveAnchor = H * 0.4167;
-      const ctrlExtend = H * 0.1181;
+      // Enclosure — port of jsesh's EnclosureDrawer. A rectangular frame
+      // with square corner bastions plus evenly distributed intermediate
+      // bastions on every side. Bastions are filled rectangles that
+      // protrude outward from the frame.
+      //
+      // Shape constants from JSesh's DrawingPreferences:
+      //   bDepth   ≈ how far each bastion sticks out from the frame
+      //   bLength  ≈ how long each bastion is along the frame side
+      // We anchor both to the perp axis so the look is the same
+      // regardless of orientation.
+      const refPerp = vertical ? W : H;
+      const bDepth = Math.max(1.5, refPerp * 0.06);
+      const bLength = Math.max(2, refPerp * 0.1);
+      const fillStyle = "fill:#000000;stroke:none";
 
-      const leftAnchorX = Math.min(curveAnchor, W / 2);
-      const rightAnchorX = Math.max(W - curveAnchor, W / 2);
-      const yTop = pad;
-      const yBot = H - pad;
+      // Inner frame rectangle (the bastions sit just outside this).
+      const xLeft = bDepth;
+      const xRight = W - bDepth;
+      const yTop = bDepth;
+      const yBot = H - bDepth;
 
-      const leftCurve = document.createElementNS(svgNS, "path");
-      leftCurve.setAttribute(
-        "d",
-        `M ${leftAnchorX} ${yTop} C ${-ctrlExtend} ${yTop} ${-ctrlExtend} ${yBot} ${leftAnchorX} ${yBot}`,
+      const frame = document.createElementNS(svgNS, "rect");
+      frame.setAttribute("x", String(xLeft));
+      frame.setAttribute("y", String(yTop));
+      frame.setAttribute(
+        "width",
+        String(Math.max(0, xRight - xLeft)),
       );
-      leftCurve.setAttribute("style", strokeStyle);
-      svg.appendChild(leftCurve);
-
-      const rightCurve = document.createElementNS(svgNS, "path");
-      rightCurve.setAttribute(
-        "d",
-        `M ${rightAnchorX} ${yTop} C ${W + ctrlExtend} ${yTop} ${W + ctrlExtend} ${yBot} ${rightAnchorX} ${yBot}`,
+      frame.setAttribute(
+        "height",
+        String(Math.max(0, yBot - yTop)),
       );
-      rightCurve.setAttribute("style", strokeStyle);
-      svg.appendChild(rightCurve);
+      frame.setAttribute("style", strokeStyle);
+      svg.appendChild(frame);
 
-      if (rightAnchorX > leftAnchorX + 0.5) {
-        const topLine = document.createElementNS(svgNS, "path");
-        topLine.setAttribute(
-          "d",
-          `M ${leftAnchorX} ${yTop} L ${rightAnchorX} ${yTop}`,
-        );
-        topLine.setAttribute("style", strokeStyle);
-        svg.appendChild(topLine);
+      const addBastion = (x: number, y: number, w: number, h: number) => {
+        if (w <= 0 || h <= 0) return;
+        const r = document.createElementNS(svgNS, "rect");
+        r.setAttribute("x", String(x));
+        r.setAttribute("y", String(y));
+        r.setAttribute("width", String(w));
+        r.setAttribute("height", String(h));
+        r.setAttribute("style", fillStyle);
+        svg.appendChild(r);
+      };
 
-        const bottomLine = document.createElementNS(svgNS, "path");
-        bottomLine.setAttribute(
-          "d",
-          `M ${leftAnchorX} ${yBot} L ${rightAnchorX} ${yBot}`,
-        );
-        bottomLine.setAttribute("style", strokeStyle);
-        svg.appendChild(bottomLine);
-      }
+      // --- Corner bastions ---
+      // Top-left: an L of two filled rects, one going down and one going right.
+      addBastion(xLeft - bDepth, yTop - bDepth, bDepth, bDepth + bLength);
+      addBastion(xLeft - bDepth, yTop - bDepth, bDepth + bLength, bDepth);
+      // Top-right.
+      addBastion(xRight, yTop - bDepth, bDepth, bDepth + bLength);
+      addBastion(xRight - bLength, yTop - bDepth, bDepth + bLength, bDepth);
+      // Bottom-left.
+      addBastion(xLeft - bDepth, yBot - bLength, bDepth, bLength);
+      addBastion(xLeft - bDepth, yBot, bDepth + bLength, bDepth);
+      // Bottom-right.
+      addBastion(xRight, yBot - bLength, bDepth, bLength);
+      addBastion(xRight - bLength, yBot, bDepth + bLength, bDepth);
 
-      const barX = W - Math.max(1, H * 0.03);
-      const endBar = document.createElementNS(svgNS, "path");
-      endBar.setAttribute("d", `M ${barX} ${yTop} L ${barX} ${yBot}`);
-      endBar.setAttribute("style", barStyle);
-      svg.appendChild(endBar);
+      // --- Intermediate bastions, evenly distributed between corners. ---
+      // Pattern (from jsesh's BastionDrawingInfo):
+      //   n = floor((l - 3b) / 2b)         // number of bastions
+      //   skip = (l - n*b) / (n+1)          // gap between bastions
+      // where l is the inner side length and b is bLength.
+      const placeBastions = (
+        innerLen: number,
+        place: (offset: number) => void,
+      ) => {
+        if (innerLen <= 3 * bLength) return;
+        const n = Math.floor((innerLen - 3 * bLength) / (2 * bLength));
+        if (n <= 0) return;
+        const skip = (innerLen - n * bLength) / (n + 1);
+        for (let i = 0; i < n; i++) {
+          const offset = skip * (i + 1) + bLength * i;
+          place(offset);
+        }
+      };
+
+      // Top side: bastions sticking UP.
+      placeBastions(xRight - xLeft, (offset) => {
+        addBastion(xLeft + offset, yTop - bDepth, bLength, bDepth);
+      });
+      // Bottom side: bastions sticking DOWN.
+      placeBastions(xRight - xLeft, (offset) => {
+        addBastion(xLeft + offset, yBot, bLength, bDepth);
+      });
+      // Left side: bastions sticking LEFT.
+      placeBastions(yBot - yTop, (offset) => {
+        addBastion(xLeft - bDepth, yTop + offset, bDepth, bLength);
+      });
+      // Right side: bastions sticking RIGHT.
+      placeBastions(yBot - yTop, (offset) => {
+        addBastion(xRight, yTop + offset, bDepth, bLength);
+      });
     }
 
     return svg;
@@ -3482,7 +4038,12 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         const isVert = iconEl.dataset.vertical === "true";
         const oldSvg = iconEl.querySelector(":scope > svg");
         if (oldSvg) oldSvg.remove();
-        const newSvg = buildCartoucheSvg(newW, newH, isVert);
+        const newSvg = buildCartoucheSvg(
+          newW,
+          newH,
+          isVert,
+          getCartoucheShape(iconEl),
+        );
         iconEl.insertBefore(newSvg, iconEl.firstChild);
 
         const container = iconEl.querySelector(
@@ -5937,7 +6498,12 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
           const oldSvg = el.querySelector(":scope > svg");
           if (oldSvg) oldSvg.remove();
-          const newSvg = buildCartoucheSvg(newW, newH, shouldBeVertical);
+          const newSvg = buildCartoucheSvg(
+            newW,
+            newH,
+            shouldBeVertical,
+            getCartoucheShape(el),
+          );
           el.insertBefore(newSvg, el.firstChild);
         }
         return;
@@ -6536,7 +7102,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     commitHistory("push");
   };
 
-  const wrapInCartouche = () => {
+  const wrapInCartouche = (shape: CartoucheShape = "oval") => {
     if (!editorCanEdit) return;
 
     const editor = editorRef.current;
@@ -6644,6 +7210,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     cartoucheWrapper.draggable = false;
     cartoucheWrapper.dataset.id = Math.random().toString(36).substr(2, 9);
     cartoucheWrapper.dataset.cartouche = "true";
+    cartoucheWrapper.dataset.cartoucheShape = shape;
     cartoucheWrapper.dataset.baseSize = String(iconSize);
     cartoucheWrapper.dataset.origWidth = String(cartoucheWidth);
     cartoucheWrapper.dataset.origHeight = String(cartoucheHeight);
@@ -6671,6 +7238,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       cartoucheWidth,
       cartoucheHeight,
       isVertical,
+      shape,
     );
 
     const iconsContainer = document.createElement("span");

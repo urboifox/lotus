@@ -22,6 +22,7 @@ import TextSize from "./TextSize";
 import IconSize from "./IconSize";
 import ShadingPatterns from "./ShadingPatterns";
 import RotateGlyph from "./RotateGlyph";
+import CartouchePicker, { type CartoucheShape } from "./CartouchePicker";
 
 interface IProps {
   handleTextCommand: (command: string, value?: string | null) => void;
@@ -42,7 +43,7 @@ interface IProps {
   showShadingButton?: boolean;
   iconHasShading?: boolean;
   onInsertFullShading?: (pattern: string) => void;
-  onCartoucheWrap?: () => void;
+  onCartoucheWrap?: (shape?: CartoucheShape) => void;
   onMagicBox?: () => void;
   iconVerticalAlign?: "top" | "middle" | "bottom";
   onIconVerticalAlign?: (align: "top" | "middle" | "bottom") => void;
@@ -52,32 +53,6 @@ interface IProps {
     options?: { commit?: boolean },
   ) => void;
 }
-// Cartouche SVG icon component
-const CartoucheIcon = () => (
-  <svg
-    xmlns="http://www.w3.org/2000/svg"
-    width="20"
-    height="22"
-    viewBox="0 0 15.75 18"
-    style={{
-      display: "block",
-    }}
-  >
-    <path
-      d="M 7.5 0.375 C -2.125 0.375 -2.125 17.625 7.5 17.625"
-      style={{ fill: "none", stroke: "currentColor", strokeWidth: 1.2 }}
-    />
-    <path
-      d="M 15.1875 0.375 L 15.1875 17.625"
-      style={{ fill: "none", stroke: "currentColor", strokeWidth: 1.2 }}
-    />
-    <path
-      d="M 7.5 0.375 C 17.125 0.375 17.125 17.625 7.5 17.625"
-      style={{ fill: "none", stroke: "currentColor", strokeWidth: 1.2 }}
-    />
-  </svg>
-);
-
 const Assistant = ({
   handleTextCommand,
   setDirection,
@@ -837,25 +812,13 @@ const Assistant = ({
         Group
       </button>
 
-      {/* --- CARTOUCHE WRAP BUTTON --- */}
-      <button
-        onClick={onCartoucheWrap}
-        disabled={selectedIconCount < 1}
-        title="Wrap selected icons in Cartouche"
-        style={{
-          padding: "4px 6px",
-          backgroundColor: selectedIconCount >= 1 ? "#d4a574" : "transparent",
-          color: selectedIconCount >= 1 ? "white" : "#374151",
-          border: `1px solid ${selectedIconCount >= 1 ? "#d4a574" : "#d1d5db"}`,
-          borderRadius: 4,
-          cursor: selectedIconCount >= 1 ? "pointer" : "not-allowed",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <CartoucheIcon />
-      </button>
+      {/* --- CARTOUCHE SHAPE PICKER --- */}
+      {onCartoucheWrap && (
+        <CartouchePicker
+          selectedIconCount={selectedIconCount}
+          onCartoucheWrap={(shape) => onCartoucheWrap(shape)}
+        />
+      )}
 
       {/* --- MAGIC BOX BUTTON --- */}
       <button
