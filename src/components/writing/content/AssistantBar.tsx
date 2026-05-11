@@ -23,6 +23,7 @@ import IconSize from "./IconSize";
 import ShadingPatterns from "./ShadingPatterns";
 import RotateGlyph from "./RotateGlyph";
 import CartouchePicker, { type CartoucheShape } from "./CartouchePicker";
+import GroupPicker, { type GroupOrientation } from "./GroupPicker";
 
 interface IProps {
   handleTextCommand: (command: string, value?: string | null) => void;
@@ -30,7 +31,7 @@ interface IProps {
   direction: "ltr" | "rtl";
   toggleColumnMode: () => void;
   columnMode: boolean;
-  mergeGroup: () => void;
+  mergeGroup: (orientation?: GroupOrientation) => void;
   selectedIconCount: number;
   textSize: number;
   setTextSize: (textSize: number) => void;
@@ -770,24 +771,12 @@ const Assistant = ({
         </button>
       )}
 
-      {/* --- GROUP ICONS --- */}
-      <button
-        onClick={mergeGroup}
-        disabled={selectedIconCount < 2}
-        title="Group selected icons vertically"
-        style={{
-          padding: "4px 8px",
-          backgroundColor: selectedIconCount >= 2 ? "#3b82f6" : "transparent",
-          color: selectedIconCount >= 2 ? "white" : "#374151",
-          border: `1px solid ${selectedIconCount >= 2 ? "#3b82f6" : "#d1d5db"}`,
-          borderRadius: 4,
-          cursor: selectedIconCount >= 2 ? "pointer" : "not-allowed",
-          fontWeight: 500,
-          fontSize: 12,
-        }}
-      >
-        Group
-      </button>
+      {/* --- GROUP ICONS (orientation picker) --- */}
+      <GroupPicker
+        selectedIconCount={selectedIconCount}
+        onGroup={(orientation) => mergeGroup(orientation)}
+      />
+      {/* --- /GROUP ICONS --- */}
 
       {/* --- CARTOUCHE SHAPE PICKER --- */}
       {onCartoucheWrap && (

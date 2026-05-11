@@ -6316,22 +6316,16 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       };
     }
 
-    // Horizontal merge (used when the line itself is vertical — group
-    // lays its glyphs side-by-side perpendicular to the column).
+    // Side-by-side merge — the user picked "Group horizontally" in
+    // the toolbar (or MagicBox forced it). Glyphs are packed side by
+    // side regardless of the surrounding line direction.
     //
-    // In a vertical column, `baseSize` constrains the column WIDTH
-    // (cross-axis), not the inline extent along the column. So the
-    // wrapper is sized as `baseSize × content_height` — the cross-axis
-    // is the full column width, the inline-axis only takes whatever
-    // height the side-by-side content actually needs.
-    //
-    // Earlier this branch forced `wrapperH = baseSize` (a baseSize×
-    // baseSize square wrapper) and bottom-anchored the content. For
-    // two low glyphs grouped together, that left ~80% empty space
-    // above the artwork — visible as huge padding on top of the
-    // merged group inside the vertical column. Letting wrapperH track
-    // the content height removes that gap while still keeping the
-    // group aligned to the column on the cross-axis.
+    // The wrapper is sized as `baseSize × content_height`: the inline
+    // direction is capped at one quadrat width (`baseSize`) so the
+    // group reads as a single unit; the cross-axis only takes whatever
+    // height the side-by-side content actually needs (no forced
+    // baseSize square — that used to leave 80% empty space above
+    // pairs of low glyphs in vertical columns).
     if (horizontal) {
       const targetW = Math.round(Math.min(90, Math.max(12, baseSize)));
       const targetH = Math.round(Math.min(90, Math.max(12, baseSize)));
@@ -6404,9 +6398,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         finalH = desiredH;
       }
 
-      const contentW =
-        slotWidths.reduce((s, w) => s + w, 0) + totalGapsW;
-      const offsetX = (targetW - contentW) / 2;
+      const slotsTotalW = slotWidths.reduce((s, w) => s + w, 0);
 
       wrapperW = targetW;
       // Wrapper height tracks the actual content — no forced
@@ -6415,7 +6407,32 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       // groups so a pathological combination can't blow out the line.
       wrapperH = Math.max(1, Math.round(Math.min(heightCap, finalH)));
 
-      let cursor = offsetX;
+      // Space-between positioning: the first slot hugs the left edge
+      // and the last slot hugs the right edge, with any leftover
+      // horizontal space distributed equally as gaps between slots.
+      // For narrow glyphs (e.g. two grouped sticks) this stretches
+      // them to the line bounds instead of clustering them in the
+      // middle — matches the equivalent space-between rule we use
+      // for vertically-grouped low glyphs in horizontal docs.
+      // Falls back to a centered layout (minimum INTERNAL_GAP)
+      // when content is already wider than the wrapper.
+      let startX: number;
+      let effectiveGap: number;
+      if (n === 1) {
+        startX = (wrapperW - slotsTotalW) / 2;
+        effectiveGap = 0;
+      } else {
+        const remaining = wrapperW - slotsTotalW;
+        if (remaining >= (n - 1) * INTERNAL_GAP) {
+          startX = 0;
+          effectiveGap = remaining / (n - 1);
+        } else {
+          startX = Math.max(0, (wrapperW - (slotsTotalW + totalGapsW)) / 2);
+          effectiveGap = INTERNAL_GAP;
+        }
+      }
+
+      let cursor = startX;
       slotDims = slotWidths.map((sw, i) => {
         // Small slots keep their intrinsic height inside the (now
         // tight) wrapper. The artwork is centered vertically inside
@@ -6431,8 +6448,12 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         // non-small slot; smalls are just shorter than the wrapper
         // and align to the bottom for parity with un-grouped lows).
         const slotTop = Math.max(0, wrapperH - slotH);
-        const dim = { w: sw, h: slotH, left: cursor, top: slotTop };
-        cursor += sw + INTERNAL_GAP;
+        // Pin the last slot's right edge explicitly — without this,
+        // rounding errors when distributing `effectiveGap` could leave
+        // a sub-pixel gap between the last glyph and the right bound.
+        const left = i === n - 1 ? wrapperW - sw : cursor;
+        const dim = { w: sw, h: slotH, left, top: slotTop };
+        cursor += sw + effectiveGap;
         return dim;
       });
     } else {
@@ -6774,7 +6795,11 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     wrapper.style.width = `${wrapperW}px`;
     wrapper.style.height = `${wrapperH}px`;
     wrapper.style.margin =
-      layoutMode === "natural-stack" ? "12px 3px" : "4px 3px";
+      layoutMode === "natural-stack"
+        ? "12px 3px"
+        : layoutMode === "side-by-side"
+          ? "4px 10px"
+          : "4px 3px";
 
     const maxComboW = Math.min(90, baseSize);
     if (layoutMode === "natural-stack") {
@@ -6900,15 +6925,20 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       mergedWrapper.dataset.mergeColTargetH = String(columnMergeTargetH);
       mergedWrapper.dataset.mergeColRef = String(iconSize);
     }
-    // Natural-stack groups in a vertical column get a noticeably
-    // bigger top/bottom margin than the standard 4px so neighbouring
-    // groups are clearly separate units — two adjacent groups end up
-    // ~24px apart vs the regular 8px between ungrouped glyphs, well
-    // above the 6px internal gap between glyphs inside a group.
-    // The cross-axis (3px) stays the same so the column itself isn't
-    // wider for groups than for solitary glyphs.
+    // Groups get extra outer spacing so neighbouring groups are
+    // clearly separate units. The axis we bump depends on the layout:
+    //   • natural-stack (vertical-line stack) → bigger top/bottom
+    //     margin (~24px between adjacent groups in the column).
+    //   • side-by-side (horizontal group) → bigger left/right margin
+    //     so two adjacent horizontal groups don't run into each other
+    //     in a horizontal line.
+    //   • quadrat → standard 4px / 3px, same as solitary glyphs.
     const wrapperMargin =
-      layoutMode === "natural-stack" ? "12px 3px" : "4px 3px";
+      layoutMode === "natural-stack"
+        ? "12px 3px"
+        : layoutMode === "side-by-side"
+          ? "4px 10px"
+          : "4px 3px";
     // Vertical-stack natural mode doesn't have a fixed cap — the
     // wrapper is content-sized. Keep the safety cap for quadrat /
     // side-by-side layouts so a weird combination can't blow out
@@ -7454,7 +7484,14 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     return out.length > 0 ? out : [el];
   };
 
-  const mergeGroup = () => {
+  // `orientation` mirrors JSesh's two grouping commands:
+  //   • "vertical"  – stack glyphs (quadrat in horizontal lines,
+  //                   natural-stack in vertical lines). Default.
+  //   • "horizontal" – pack glyphs side-by-side regardless of the
+  //                   surrounding line direction.
+  const mergeGroup = (
+    orientation: "vertical" | "horizontal" = "vertical",
+  ) => {
     if (!editorCanEdit) return;
 
     const editor = editorRef.current;
@@ -7513,7 +7550,9 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     );
     if (flatLeaves.length < 2) return;
 
-    const mergedWrapper = createMergedIcon(flatLeaves);
+    const mergedWrapper = createMergedIcon(flatLeaves, {
+      horizontal: orientation === "horizontal",
+    });
     if (!mergedWrapper) return;
 
     const first = iconsToMerge[0] as HTMLElement;
