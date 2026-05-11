@@ -29,6 +29,7 @@ interface IProps {
   setDirection: (direction: "ltr" | "rtl") => void;
   direction: "ltr" | "rtl";
   toggleColumnMode: () => void;
+  columnMode: boolean;
   mergeGroup: () => void;
   selectedIconCount: number;
   textSize: number;
@@ -58,6 +59,7 @@ const Assistant = ({
   setDirection,
   direction,
   toggleColumnMode,
+  columnMode,
   mergeGroup,
   selectedIconCount,
   textSize,
@@ -90,10 +92,6 @@ const Assistant = ({
   >("left");
   const [showShadingModal, setShowShadingModal] = React.useState(false);
   const [textColor, setTextColor] = React.useState("#000000");
-  // True when the caret / selection anchor sits inside a `.vertical-run`
-  // span. Drives the Vertical Mode button's active state so it behaves
-  // like Bold / Italic — reflecting the local context, not a global flag.
-  const [isInVerticalRun, setIsInVerticalRun] = React.useState(false);
 
   // Read the current Selection and refresh every formatting-state flag
   // (bold, italic, vertical-run, list, alignment, font, etc). Called
@@ -135,20 +133,6 @@ const Assistant = ({
         setTextAlign("left");
       }
 
-      // Is the caret / selection anchor inside a `.vertical-run`?
-      let inVertical = false;
-      let node: Node | null = anchorNode;
-      while (node && node !== editorElement) {
-        if (
-          node instanceof HTMLElement &&
-          node.classList.contains("vertical-run")
-        ) {
-          inVertical = true;
-          break;
-        }
-        node = node.parentNode;
-      }
-      setIsInVerticalRun(inVertical);
     } catch {
       // ignore
     }
@@ -179,15 +163,8 @@ const Assistant = ({
     };
   }, [refreshFromSelection]);
 
-  // Wrap the Vertical Mode button click so we explicitly refresh state
-  // after `toggleColumnMode` runs. The toggle mutates DOM and re-sets
-  // the selection programmatically; the resulting `selectionchange` is
-  // sometimes debounced past the synchronous return of this handler, so
-  // we also schedule a refresh on the next animation frame to guarantee
-  // the button's active state catches up with the new selection.
   const handleVerticalModeClick = () => {
     toggleColumnMode();
-    requestAnimationFrame(refreshFromSelection);
   };
 
   const handleBoldClick = () => {
@@ -735,12 +712,12 @@ const Assistant = ({
 
       <button
         onClick={handleVerticalModeClick}
-        title="Vertical mode: applies to your selection if any, otherwise to all hieroglyphs"
+        title="Vertical mode: flip every hieroglyph in the document to a vertical run"
         style={{
           padding: "4px 8px",
-          backgroundColor: isInVerticalRun ? "#ccaa83" : "transparent",
-          color: isInVerticalRun ? "white" : "#374151",
-          border: `1px solid ${isInVerticalRun ? "#ccaa83" : "#d1d5db"}`,
+          backgroundColor: columnMode ? "#ccaa83" : "transparent",
+          color: columnMode ? "white" : "#374151",
+          border: `1px solid ${columnMode ? "#ccaa83" : "#d1d5db"}`,
           borderRadius: 4,
           cursor: "pointer",
           fontWeight: 500,

@@ -4213,25 +4213,37 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       const n = slots.length;
       if (n === 0) return;
 
-      const layout = iconEl.dataset.layout || "vertical";
+      // Read the layout mode the group was created with. Older
+      // wrappers from before this attribute existed default to the
+      // appropriate legacy mode based on the simpler `data-layout`.
+      const storedMode = iconEl.dataset.layoutMode;
+      const legacyLayout = iconEl.dataset.layout || "vertical";
+      const layoutMode: MergedLayoutMode =
+        storedMode === "natural-stack" ||
+        storedMode === "side-by-side" ||
+        storedMode === "quadrat"
+          ? storedMode
+          : legacyLayout === "horizontal"
+            ? "side-by-side"
+            : legacyLayout === "natural-stack"
+              ? "natural-stack"
+              : "quadrat";
+      const isSideBySide = layoutMode === "side-by-side";
+      const isNaturalStack = layoutMode === "natural-stack";
       const maxComboW = Math.min(90, size);
 
       // Run through the shared `computeMergedLayout` helper so resize
       // honours the same INTERNAL_GAP (and all other layout decisions)
-      // as creation/relayout. This block used to duplicate the math
-      // inline and silently dropped the gap, which made the spacing
-      // between grouped glyphs collapse to 0 every time the user
-      // changed the global icon size.
+      // as creation. This block used to duplicate the math inline and
+      // silently dropped the gap, which made the spacing between
+      // grouped glyphs collapse to 0 every time the user changed the
+      // global icon size.
       const sourceIcons = slots
         .map((slot) => slot.firstElementChild as Element | null)
         .filter((el): el is Element => !!el);
       if (sourceIcons.length !== n) return;
 
-      const layoutResult = computeMergedLayout(
-        sourceIcons,
-        layout === "horizontal",
-        size,
-      );
+      const layoutResult = computeMergedLayout(sourceIcons, layoutMode, size);
       if (!layoutResult) return;
 
       const {
@@ -4244,7 +4256,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       const slotLayout = slotDims;
 
       if (
-        layout === "horizontal" &&
+        isSideBySide &&
         iconEl.dataset.mergeColumnBox === "true" &&
         columnMergeTargetW !== null &&
         columnMergeTargetH !== null
@@ -4258,10 +4270,15 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       iconEl.style.height = `${wrapperH}px`;
       iconEl.dataset.origWidth = String(wrapperW);
       iconEl.dataset.origHeight = String(wrapperH);
-      if (layout === "horizontal" && iconEl.dataset.mergeColumnBox === "true") {
+      if (isNaturalStack) {
+        // Wrapper sized to content — no caps so it can grow as tall
+        // as the natural-size stack needs.
+        iconEl.style.maxWidth = "";
+        iconEl.style.maxHeight = "";
+      } else if (isSideBySide && iconEl.dataset.mergeColumnBox === "true") {
         iconEl.style.maxWidth = `${maxComboW}px`;
         iconEl.style.maxHeight = `${Math.min(90, size)}px`;
-      } else if (layout === "horizontal") {
+      } else if (isSideBySide) {
         iconEl.style.maxWidth = `${maxComboW}px`;
         iconEl.style.maxHeight = "";
       } else {
@@ -5951,22 +5968,46 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     columnMergeTargetH: number | null;
   };
 
-  // Classify a source glyph as "small" — JSesh-style "small" signs are
-  // visibly less than full-quadrat on BOTH axes (e.g. tiny dots, hash
-  // marks). In our model that's any glyph whose `picture_size` is below
-  // 100 AND whose intrinsic aspect ratio is roughly square (~1). The
-  // squareness gate is critical: horizontal signs (AR > ~1.5) and
-  // vertical/staff signs (AR < ~0.67) also commonly carry ps != 100 to
-  // express their "low" / "narrow" category, but the user explicitly
-  // wants those to keep filling their slot in groups (this is what the
-  // previous fix achieved for horizontal stacks). Only true smalls
-  // should refuse to grow.
+  // Three merged-group layout modes:
+  //   • "quadrat"       — JSesh's horizontal-line behaviour: glyphs are
+  //                       packed into a single line-height block, smalls
+  //                       keep natural size, non-smalls stretch to share
+  //                       the height, first/last touch the line bounds.
+  //   • "side-by-side"  — Glyphs laid out horizontally next to each
+  //                       other. Used by MagicBox; never picked
+  //                       automatically.
+  //   • "natural-stack" — Vertical-column behaviour: each glyph keeps
+  //                       its natural rendered size, stacked top-to-
+  //                       bottom with NO internal gap. The group looks
+  //                       like the same glyphs would if they weren't
+  //                       grouped at all; a slightly wider wrapper
+  //                       margin gives 1–2px of visual separation
+  //                       between adjacent groups.
+  type MergedLayoutMode = "quadrat" | "side-by-side" | "natural-stack";
+
+  // Classify a source glyph as "small" — JSesh-style "small" signs
+  // are visibly less than full-quadrat on BOTH axes (e.g. tiny dots,
+  // hash marks). Pure AR or pure picture_size thresholds aren't enough
+  // to tell them apart from horizontal/vertical signs (which can share
+  // the same picture_size value and only differ in artwork shape).
+  // Instead we compute the actual *visible artwork box* — the wrapper
+  // CSS box from `getIconLayoutDimensions` with the artwork's tight-
+  // viewBox AR letterboxed inside via `preserveAspectRatio: meet`. A
+  // glyph is "small" iff that visible box is below the smallness
+  // threshold on BOTH axes:
   //
-  // Composite atoms (merged groups, cartouches) are never "small" — we
-  // always want their entire frame to fit the slot.
-  const SMALL_AR_MIN = 0.7;
-  const SMALL_AR_MAX = 1.4;
-  const SMALL_PS_MAX = 95;
+  //   • Full sign (AR≈1, ps=100): artwork 100%×100%  → not small
+  //   • Horizontal low sign (AR≈2, ps=100): artwork 100%×50% → not
+  //     small (width axis is full)
+  //   • Vertical/staff sign (AR≈0.25, ps=100): artwork 25%×100% →
+  //     not small (height axis is full)
+  //   • Small dot/mark (AR≈1.67, ps=50): artwork 50%×30% → small
+  //   • Square small (AR≈1, ps<100, when ps actually shrinks the
+  //     artwork): both axes small → small
+  //
+  // Composite atoms (merged groups, cartouches) are never "small" —
+  // we always want their entire frame to fit the slot.
+  const SMALL_THRESHOLD_FRACTION = 0.85;
 
   const readIconAspect = (el: HTMLElement): { arW: number; arH: number } => {
     let arW = Number(el.dataset.arW);
@@ -5992,53 +6033,73 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     return { arW, arH };
   };
 
-  const isSmallIcon = (icon: Element): boolean => {
-    const el = icon as HTMLElement;
-    if (el.classList.contains("merged")) return false;
-    if (el.dataset.cartouche === "true") return false;
-    const ps = Number(el.dataset.pictureSize) || 100;
-    if (ps >= SMALL_PS_MAX) return false;
-    const { arW, arH } = readIconAspect(el);
-    const ar = arW / arH;
-    return ar >= SMALL_AR_MIN && ar <= SMALL_AR_MAX;
-  };
-
-  // Natural rendered size for a small glyph at the given `baseSize`.
-  // `picture_size` is the relative-size attribute coming from the
-  // backend (100 = fills the quadrat, smaller = proportionally smaller
-  // on the dominant axis). For a square-ish small sign we use that
-  // fraction for both axes with a mild AR adjustment, capping at
-  // baseSize so a pathological ps>100 doesn't blow out the quadrat.
-  const getSmallIntrinsicSize = (
+  // The visible artwork box for a glyph at `baseSize`. We route
+  // through `getIconLayoutDimensions` to get the wrapper's CSS box
+  // (this is the same path that produces the in-line rendering), then
+  // apply `preserveAspectRatio: meet` to find how much of that box
+  // the actual artwork (tight-viewBox bbox) ends up occupying.
+  const getIconArtworkBox = (
     icon: Element,
     baseSize: number,
   ): { w: number; h: number } => {
     const el = icon as HTMLElement;
-    const ps = Math.max(1, Number(el.dataset.pictureSize) || 100);
+    const ps = Number(el.dataset.pictureSize) || 100;
     const { arW, arH } = readIconAspect(el);
     const ar = arW / arH;
-    const dim = Math.max(4, Math.round((ps / 100) * baseSize));
-    let w: number;
-    let h: number;
-    if (ar >= 1) {
-      h = dim;
-      w = Math.min(baseSize, Math.round(dim * ar));
-    } else {
-      w = dim;
-      h = Math.min(baseSize, Math.round(dim / ar));
+    const { width: wrapperW, height: wrapperH } = getIconLayoutDimensions(
+      ps,
+      baseSize,
+      arW,
+      arH,
+      false,
+    );
+    const safeWrapperW = Math.max(1, wrapperW);
+    const safeWrapperH = Math.max(1, wrapperH);
+    const wrapperAR = safeWrapperW / safeWrapperH;
+    if (ar >= wrapperAR) {
+      return { w: safeWrapperW, h: safeWrapperW / ar };
     }
-    return { w, h };
+    return { w: safeWrapperH * ar, h: safeWrapperH };
+  };
+
+  const isSmallIcon = (icon: Element): boolean => {
+    const el = icon as HTMLElement;
+    if (el.classList.contains("merged")) return false;
+    if (el.dataset.cartouche === "true") return false;
+    const base =
+      Number(el.dataset.baseSize) > 0
+        ? Number(el.dataset.baseSize)
+        : iconSize;
+    const { w, h } = getIconArtworkBox(el, base);
+    const limit = base * SMALL_THRESHOLD_FRACTION;
+    return w < limit && h < limit;
+  };
+
+  // Natural rendered size for a small glyph at the given `baseSize`.
+  // This is the same visible artwork box used by the smallness check,
+  // so a small icon appears at the *exact same size* inside a group as
+  // it does in regular text.
+  const getSmallIntrinsicSize = (
+    icon: Element,
+    baseSize: number,
+  ): { w: number; h: number } => {
+    const { w, h } = getIconArtworkBox(icon, baseSize);
+    return {
+      w: Math.max(4, Math.round(w)),
+      h: Math.max(4, Math.round(h)),
+    };
   };
 
   const computeMergedLayout = (
     icons: Element[],
-    horizontal: boolean,
+    layoutMode: MergedLayoutMode,
     baseSize: number,
   ): MergedLayout | null => {
     const n = icons.length;
     if (n < 2) return null;
 
     const maxComboW = Math.min(90, baseSize);
+    const horizontal = layoutMode === "side-by-side";
 
     // Pixel gap between adjacent glyph slots. Keeps grouped glyphs
     // visibly separate (matching JSesh's grouped-quadrat spacing) instead
@@ -6108,14 +6169,125 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         return ew / eh;
       });
 
-    // Critical invariant (matches JSesh's quadrat model): every merged
-    // group occupies a FULL line-height block, regardless of how many
-    // or what shape of glyphs it contains. Two horizontal "low" glyphs
-    // grouped side-by-side still produce a baseSize-tall wrapper —
-    // the glyphs themselves scale and center inside it. Without this,
-    // grouped horizontals shrank to a sliver while neighbouring
-    // un-grouped glyphs kept their full line height, so lines became
-    // visually staggered.
+    // Natural-stack mode (vertical column): every slot uses the
+    // glyph's natural rendered size at the current column-mode
+    // dimensions, glyphs stack top-to-bottom with NO internal gap,
+    // and the wrapper sizes to fit. The merged group then reads as
+    // a tight stack of normal-looking glyphs in the column; a
+    // slightly bigger wrapper margin (set in `createMergedIcon`)
+    // produces the 1–2px breathing room between adjacent groups
+    // the client asked for.
+    if (layoutMode === "natural-stack") {
+      const naturalSize = (icon: Element): { w: number; h: number } => {
+        const el = icon as HTMLElement;
+        // Composites carry their canonical box on the wrapper
+        // (origWidth / origHeight). Falling back to inner content
+        // would shrink nested groups, same trap as readAspectRatios.
+        if (
+          el.classList.contains("merged") ||
+          el.dataset.cartouche === "true"
+        ) {
+          const ow = Number(el.dataset.origWidth) || baseSize;
+          const oh = Number(el.dataset.origHeight) || baseSize;
+          return { w: Math.max(1, ow), h: Math.max(1, oh) };
+        }
+        // Small glyphs (dots, tiny strokes, etc.) should occupy
+        // only their visible artwork box in the stack — using the
+        // column-mode picker would pad them up to baseSize×baseSize
+        // and reintroduce the "huge dot" issue we already fixed for
+        // horizontal groups.
+        if (isSmallIcon(el)) {
+          const { w, h } = getSmallIntrinsicSize(el, baseSize);
+          return { w: Math.max(1, w), h: Math.max(1, h) };
+        }
+        const ps = Number(el.dataset.pictureSize) || 100;
+        let arW = Number(el.dataset.arW);
+        let arH = Number(el.dataset.arH);
+        if (
+          !Number.isFinite(arW) ||
+          !Number.isFinite(arH) ||
+          arW <= 0 ||
+          arH <= 0
+        ) {
+          const svg = el.querySelector("svg") as SVGSVGElement | null;
+          if (svg) {
+            const vb = svg.getAttribute("viewBox");
+            if (vb) {
+              const p = vb.trim().split(/[\s,]+/);
+              arW = parseFloat(p[2]) || 100;
+              arH = parseFloat(p[3]) || 100;
+            }
+          }
+          if (!Number.isFinite(arW) || arW <= 0) arW = 100;
+          if (!Number.isFinite(arH) || arH <= 0) arH = 100;
+        }
+        // Use the column-mode branch of getIconLayoutDimensions so
+        // each slot matches the size that an UN-grouped glyph would
+        // have in the same column — that's the whole point of
+        // "displays like its not grouped".
+        const { width, height } = getIconLayoutDimensions(
+          ps,
+          baseSize,
+          arW,
+          arH,
+          true,
+        );
+        return { w: Math.max(1, width), h: Math.max(1, height) };
+      };
+
+      // Internal separator inside the stack. Matches the horizontal-
+      // mode between-glyph gap: in a horizontal line, two adjacent
+      // .svg-icons end up ~6px apart (left/right margin of 3px on
+      // each side), so we use the same value here. The wrapper margin
+      // (set in createMergedIcon / relayoutMergedIcon) is larger than
+      // this so the outer gap between two groups still reads as bigger
+      // than the inner one.
+      const NATURAL_INTERNAL_GAP = 6;
+      const slotSizes = icons.map(naturalSize);
+      wrapperW = Math.max(...slotSizes.map((s) => s.w));
+      let cursor = 0;
+      slotDims = slotSizes.map((s, i) => {
+        const dim = {
+          w: s.w,
+          h: s.h,
+          // Center each slot on the wrapper's cross-axis so glyphs
+          // of different widths align like they would in a regular
+          // ungrouped column.
+          left: (wrapperW - s.w) / 2,
+          top: cursor,
+        };
+        cursor += s.h;
+        if (i < slotSizes.length - 1) cursor += NATURAL_INTERNAL_GAP;
+        return dim;
+      });
+      wrapperH = Math.max(1, Math.round(cursor));
+      wrapperW = Math.max(1, Math.round(wrapperW));
+
+      return {
+        wrapperW,
+        wrapperH,
+        slotDims,
+        columnMergeTargetW: null,
+        columnMergeTargetH: null,
+      };
+    }
+
+    // Horizontal merge (used when the line itself is vertical — group
+    // lays its glyphs side-by-side perpendicular to the column).
+    //
+    // In a vertical column, `baseSize` constrains the column WIDTH
+    // (cross-axis), not the inline extent along the column. So the
+    // wrapper is sized as `baseSize × content_height` — the cross-axis
+    // is the full column width, the inline-axis only takes whatever
+    // height the side-by-side content actually needs.
+    //
+    // Earlier this branch forced `wrapperH = baseSize` (a baseSize×
+    // baseSize square wrapper) and bottom-anchored the content. For
+    // two low glyphs grouped together, that left ~80% empty space
+    // above the artwork — visible as huge padding on top of the
+    // merged group inside the vertical column. Letting wrapperH track
+    // the content height removes that gap while still keeping the
+    // group aligned to the column on the cross-axis.
     if (horizontal) {
       const targetW = Math.round(Math.min(90, Math.max(12, baseSize)));
       const targetH = Math.round(Math.min(90, Math.max(12, baseSize)));
@@ -6191,27 +6363,30 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       const contentW =
         slotWidths.reduce((s, w) => s + w, 0) + totalGapsW;
       const offsetX = (targetW - contentW) / 2;
-      // Anchor the scaled content to the *bottom* of the quadrat so
-      // horizontal "low" glyphs sit on the baseline (where they'd sit
-      // un-grouped), instead of floating in the middle. Tall glyphs
-      // that already fill the quadrat are unaffected (finalH == targetH).
-      const offsetY = Math.max(0, targetH - finalH);
 
       wrapperW = targetW;
-      // Always full line height — content occupies (offsetY..targetH).
-      wrapperH = targetH;
+      // Wrapper height tracks the actual content — no forced
+      // baseSize square, no bottom-anchored gap above the artwork.
+      // Capped at the safety ceiling that already applied to merged
+      // groups so a pathological combination can't blow out the line.
+      wrapperH = Math.max(1, Math.round(Math.min(heightCap, finalH)));
 
       let cursor = offsetX;
       slotDims = slotWidths.map((sw, i) => {
-        // Small slots keep their intrinsic height too (the artwork is
-        // centered vertically inside via fitCloneIntoSlot).
+        // Small slots keep their intrinsic height inside the (now
+        // tight) wrapper. The artwork is centered vertically inside
+        // its slot by fitCloneIntoSlot.
         const slotH = smallFlags[i]
           ? Math.min(
               finalH,
               (smallIntrinsics[i] as { w: number; h: number }).h,
             )
           : finalH;
-        const slotTop = offsetY + (finalH - slotH);
+        // Slot sits at the top of the wrapper (wrapperH now equals
+        // finalH, so this is effectively the only valid Y for a
+        // non-small slot; smalls are just shorter than the wrapper
+        // and align to the bottom for parity with un-grouped lows).
+        const slotTop = Math.max(0, wrapperH - slotH);
         const dim = { w: sw, h: slotH, left: cursor, top: slotTop };
         cursor += sw + INTERNAL_GAP;
         return dim;
@@ -6230,20 +6405,24 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       // Exception for SMALL signs (dots, small marks): those should
       // keep their natural size in groups instead of being inflated to
       // fill a baseSize/n slot. So:
-      //   • All-small group: equal slots, small artwork stays at its
-      //     intrinsic size *centered inside the slot* (handled by
-      //     fitCloneIntoSlot — slot allocation is unchanged here).
+      //   • All-small group: each slot uses its glyph's *intrinsic*
+      //     height; the leftover space is distributed BETWEEN slots so
+      //     the first glyph hugs the top of the line and the last
+      //     glyph hugs the bottom.
       //   • Mixed group (smalls + non-smalls): smalls take a slot
       //     exactly as tall as their intrinsic height; the remaining
       //     height (minus gaps) is split equally between the
       //     non-smalls so they grow to absorb the unused space.
+      //   • All-non-small group: every slot gets (baseSize/n), which
+      //     already touches the top and bottom of the line.
       //
-      // Result the client asked for:
-      //   • 2 horizontals → 50% / 50%
-      //   • 3 horizontals → 33% / 33% / 33%
-      //   • 2 smalls → 50% / 50% slots, artwork stays small (centered)
-      //   • small + horizontal → small at intrinsic, horizontal fills
-      //     the rest of the quadrat
+      // Slot positions use a "space-between" rule (CSS justify-content
+      // analog): the top slot starts at y=0, the bottom slot ends at
+      // y=baseSize, and any leftover empty space (only relevant for
+      // all-small groups) is shared evenly between the inter-slot
+      // gaps. Per the client: top glyph touches the top, bottom
+      // glyph touches the bottom; centered "middle" alignment is no
+      // longer applied to small glyphs.
       const MAX_GROUP_H = 90;
       const aspectRatios = readAspectRatios();
       const gapH = INTERNAL_GAP;
@@ -6253,23 +6432,43 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       const smallIntrinsics = icons.map((icon, i) =>
         smallFlags[i] ? getSmallIntrinsicSize(icon, baseSize) : null,
       );
-      const allSame =
-        smallFlags.every((s) => s) || smallFlags.every((s) => !s);
 
       const slotHeights: number[] = new Array(n);
 
-      if (allSame) {
-        // Uniform group — split the quadrat evenly. For all-small
-        // groups, fitCloneIntoSlot will keep the artwork at intrinsic
-        // size and center it inside the (larger) slot.
+      const smallCount = smallFlags.filter((s) => s).length;
+      const nonSmallCount = n - smallCount;
+
+      // Maximum slot height for a non-small glyph that lets it fill
+      // its slot WITHOUT being letterboxed at the top/bottom. A wide
+      // glyph (AR > 1) clipped against `baseSize` cross-axis width
+      // becomes shorter than the equal share would imply; capping
+      // here trades a slightly taller inter-slot gap for an artwork
+      // that flush-fills its slot.
+      const maxNonSmallH = (idx: number, share: number): number => {
+        const ar = aspectRatios[idx];
+        if (!Number.isFinite(ar) || ar <= 1) return share;
+        return Math.min(share, baseSize / ar);
+      };
+
+      if (smallCount === 0) {
+        // All non-small — equal share, capped per-glyph to avoid
+        // horizontal-cropping letterbox padding on wider signs.
         const equalH = Math.max(1, (baseSize - totalGapsH) / n);
-        for (let i = 0; i < n; i++) slotHeights[i] = equalH;
+        for (let i = 0; i < n; i++) {
+          slotHeights[i] = Math.max(1, maxNonSmallH(i, equalH));
+        }
+      } else if (nonSmallCount === 0) {
+        // All-small — use each glyph's intrinsic height. The slots
+        // will be smaller than (baseSize/n); the empty space is
+        // pushed out to the inter-slot gaps by the positioning loop
+        // below so the first/last glyphs sit on the line boundaries.
+        for (let i = 0; i < n; i++) {
+          slotHeights[i] = (smallIntrinsics[i] as { w: number; h: number }).h;
+        }
       } else {
-        // Mixed group: smalls keep their natural height; non-smalls
-        // share the remainder so the bigger sibling absorbs the
-        // empty space a small would otherwise leave.
-        const smallCount = smallFlags.filter((s) => s).length;
-        const nonSmallCount = n - smallCount;
+        // Mixed: smalls keep their natural height; non-smalls share
+        // the remainder so the bigger sibling absorbs the empty
+        // space a small would otherwise leave (also AR-capped).
         const totalSmallH = smallIntrinsics.reduce(
           (sum, dims) => sum + (dims ? dims.h : 0),
           0,
@@ -6278,11 +6477,11 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
           1,
           baseSize - totalSmallH - totalGapsH,
         );
-        const nonSmallH = Math.max(1, remaining / nonSmallCount);
+        const nonSmallShare = Math.max(1, remaining / nonSmallCount);
         for (let i = 0; i < n; i++) {
           slotHeights[i] = smallFlags[i]
             ? (smallIntrinsics[i] as { w: number; h: number }).h
-            : nonSmallH;
+            : Math.max(1, maxNonSmallH(i, nonSmallShare));
         }
       }
 
@@ -6302,7 +6501,8 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
       wrapperW = baseSize;
       wrapperH = baseSize;
-      let contentH = slotHeights.reduce((s, h) => s + h, 0) + totalGapsH;
+      let totalSlotsH = slotHeights.reduce((s, h) => s + h, 0);
+      let contentH = totalSlotsH + totalGapsH;
 
       if (contentH > MAX_GROUP_H) {
         // Pathological — overflow the line cap. Scale all slots
@@ -6318,24 +6518,35 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         }
         wrapperW = Math.min(Math.round(baseSize * hScale), maxComboW);
         wrapperH = MAX_GROUP_H;
-        contentH = slotHeights.reduce((s, h) => s + h, 0) + totalGapsH;
+        totalSlotsH = slotHeights.reduce((s, h) => s + h, 0);
+        contentH = totalSlotsH + totalGapsH;
       }
 
-      // contentH typically equals baseSize so the stack fills the
-      // line from top to bottom (offsetY = 0). All-small groups also
-      // hit this branch because their slot heights sum to baseSize.
-      const offsetY = Math.max(0, wrapperH - contentH);
+      // Space-between distribution. With n>=2:
+      //   effectiveGap = (wrapperH - sum(slotHeights)) / (n - 1)
+      // which puts slot[0] at y=0 and slot[n-1]'s bottom at wrapperH.
+      // The minimum inter-slot gap is enforced via Math.max(gapH, ...)
+      // so adjacent slots never end up flush.
+      const effectiveGap =
+        n > 1
+          ? Math.max(gapH, (wrapperH - totalSlotsH) / (n - 1))
+          : 0;
 
-      let cursorTop = offsetY;
+      let cursorTop = 0;
       slotDims = slotHeights.map((sh, i) => {
         const sw = slotWidths[i];
+        // Force the last slot to sit exactly on the bottom edge —
+        // rounding accumulated over the previous cursor steps can
+        // otherwise leave it a fraction of a pixel short.
+        const top =
+          i === n - 1 ? Math.max(0, wrapperH - sh) : cursorTop;
         const dim = {
           w: sw,
           h: sh,
           left: (wrapperW - sw) / 2,
-          top: cursorTop,
+          top,
         };
-        cursorTop += sh + gapH;
+        cursorTop += sh + effectiveGap;
         return dim;
       });
 
@@ -6355,17 +6566,6 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       columnMergeTargetW,
       columnMergeTargetH,
     };
-  };
-
-  // True iff the merged group at `node` should lay out horizontally —
-  // i.e. its line is running vertically (it's inside a .vertical-run).
-  const shouldMergedGroupBeHorizontal = (node: Node | null): boolean => {
-    if (!node) return false;
-    const el =
-      node.nodeType === Node.ELEMENT_NODE
-        ? (node as Element)
-        : node.parentElement;
-    return !!el?.closest(".vertical-run");
   };
 
   // Fit a cloned glyph into a merged-group slot of size (slotW × slotH).
@@ -6452,6 +6652,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       if (innerSmall) {
         innerSmall.removeAttribute("width");
         innerSmall.removeAttribute("height");
+        (innerSmall.style as CSSStyleDeclaration).display = "block";
         (innerSmall.style as CSSStyleDeclaration).width = `${w}px`;
         (innerSmall.style as CSSStyleDeclaration).height = `${h}px`;
         innerSmall.setAttribute("preserveAspectRatio", "xMidYMid meet");
@@ -6465,15 +6666,128 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       left: 0;
       width: ${slotW}px;
       height: ${slotH}px;
+      line-height: 0;
     `;
     const inner = clone.querySelector("svg") as SVGElement | null;
     if (inner) {
       inner.removeAttribute("width");
       inner.removeAttribute("height");
+      // `display: block` removes the inline-baseline gap that
+      // appears under inline SVGs — without it, a horizontal glyph
+      // that exactly matches its slot AR still ends up with ~1–2px
+      // of empty space at the slot bottom because the inline box
+      // reserves room for descenders.
+      (inner.style as CSSStyleDeclaration).display = "block";
       (inner.style as CSSStyleDeclaration).width = `${slotW}px`;
       (inner.style as CSSStyleDeclaration).height = `${slotH}px`;
       inner.setAttribute("preserveAspectRatio", "xMidYMid meet");
     }
+  };
+
+  // Re-flow an existing merged-group wrapper into a different layout
+  // mode in-place. Used when the user toggles the global vertical mode
+  // so an old group created in horizontal-line (quadrat) renders as a
+  // natural stack in a vertical line, and vice-versa.
+  //
+  // Only operates on plain merged wrappers — composites with nested
+  // groups are flattened at creation time (expandMergedToLeaves), so
+  // each slot's `firstElementChild` is the source glyph we can reuse.
+  const relayoutMergedIcon = (
+    wrapper: HTMLElement,
+    layoutMode: MergedLayoutMode,
+  ) => {
+    const slots = Array.from(wrapper.children).filter(
+      (n): n is HTMLElement => n instanceof HTMLElement,
+    );
+    if (slots.length < 2) return;
+
+    const sourceIcons = slots
+      .map((slot) => slot.firstElementChild as Element | null)
+      .filter((el): el is Element => !!el);
+    if (sourceIcons.length !== slots.length) return;
+
+    const baseSize = Number(wrapper.dataset.baseSize) || iconSize;
+    const layout = computeMergedLayout(sourceIcons, layoutMode, baseSize);
+    if (!layout) return;
+
+    const {
+      wrapperW,
+      wrapperH,
+      slotDims,
+      columnMergeTargetW,
+      columnMergeTargetH,
+    } = layout;
+
+    wrapper.dataset.layoutMode = layoutMode;
+    wrapper.dataset.layout =
+      layoutMode === "side-by-side"
+        ? "horizontal"
+        : layoutMode === "natural-stack"
+          ? "natural-stack"
+          : "vertical";
+    wrapper.dataset.origWidth = String(wrapperW);
+    wrapper.dataset.origHeight = String(wrapperH);
+    wrapper.style.width = `${wrapperW}px`;
+    wrapper.style.height = `${wrapperH}px`;
+    wrapper.style.margin =
+      layoutMode === "natural-stack" ? "12px 3px" : "4px 3px";
+
+    const maxComboW = Math.min(90, baseSize);
+    if (layoutMode === "natural-stack") {
+      wrapper.style.maxWidth = "";
+      wrapper.style.maxHeight = "";
+      delete wrapper.dataset.mergeColumnBox;
+      delete wrapper.dataset.mergeColTargetW;
+      delete wrapper.dataset.mergeColTargetH;
+      delete wrapper.dataset.mergeColRef;
+    } else if (
+      layoutMode === "side-by-side" &&
+      columnMergeTargetW !== null &&
+      columnMergeTargetH !== null
+    ) {
+      wrapper.dataset.mergeColumnBox = "true";
+      wrapper.dataset.mergeColTargetW = String(columnMergeTargetW);
+      wrapper.dataset.mergeColTargetH = String(columnMergeTargetH);
+      wrapper.dataset.mergeColRef = String(baseSize);
+      wrapper.style.maxWidth = `${maxComboW}px`;
+      wrapper.style.maxHeight = `${Math.min(90, baseSize)}px`;
+    } else {
+      // quadrat
+      delete wrapper.dataset.mergeColumnBox;
+      delete wrapper.dataset.mergeColTargetW;
+      delete wrapper.dataset.mergeColTargetH;
+      delete wrapper.dataset.mergeColRef;
+      wrapper.style.maxWidth = `${maxComboW}px`;
+      wrapper.style.maxHeight = "90px";
+    }
+
+    slots.forEach((slot, i) => {
+      const { w, h, left, top } = slotDims[i];
+      slot.style.left = `${left}px`;
+      slot.style.top = `${top}px`;
+      slot.style.width = `${w}px`;
+      slot.style.height = `${h}px`;
+      const clone = slot.firstElementChild as HTMLElement | null;
+      if (clone) fitCloneIntoSlot(clone, w, h);
+    });
+  };
+
+  const relayoutAllMergedGroupsForColumnMode = (vertical: boolean) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const groups = editor.querySelectorAll(
+      ".svg-icon.merged",
+    ) as NodeListOf<HTMLElement>;
+    groups.forEach((wrapper) => {
+      // Don't touch explicit side-by-side groups (MagicBox / future
+      // callers that opt in). They're not part of the global toggle.
+      if (wrapper.dataset.layoutMode === "side-by-side") return;
+      const targetMode: MergedLayoutMode = vertical
+        ? "natural-stack"
+        : "quadrat";
+      if (wrapper.dataset.layoutMode === targetMode) return;
+      relayoutMergedIcon(wrapper, targetMode);
+    });
   };
 
   const createMergedIcon = (
@@ -6483,16 +6797,22 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     const n = icons.length;
     if (n < 2) return null;
 
-    // Orientation: explicit override > local context (closest vertical-run
-    // around the first source icon). We deliberately don't fall back to the
-    // global `columnMode`, because per-selection vertical sections can flip
-    // orientation independently of the global toggle.
-    const horizontal =
-      options?.horizontal !== undefined
-        ? options.horizontal
-        : shouldMergedGroupBeHorizontal(icons[0]);
+    // Pick the layout mode at creation time and lock it in. The mode
+    // is captured on the wrapper's dataset so toggling the global
+    // vertical switch later doesn't re-flow this group — JSesh-style,
+    // groups keep whatever layout they had when they were made.
+    //   • MagicBox forces "side-by-side" via options.horizontal.
+    //   • Otherwise: vertical line (columnMode on) → natural-stack;
+    //     horizontal line → quadrat.
+    const layoutMode: MergedLayoutMode =
+      options?.horizontal === true
+        ? "side-by-side"
+        : columnMode
+          ? "natural-stack"
+          : "quadrat";
+    const horizontal = layoutMode === "side-by-side";
 
-    const layout = computeMergedLayout(icons, horizontal, iconSize);
+    const layout = computeMergedLayout(icons, layoutMode, iconSize);
     if (!layout) return null;
     const {
       wrapperW,
@@ -6513,7 +6833,13 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     mergedWrapper.draggable = false;
     mergedWrapper.dataset.id = Math.random().toString(36).substr(2, 9);
     mergedWrapper.dataset.baseSize = String(iconSize);
-    mergedWrapper.dataset.layout = horizontal ? "horizontal" : "vertical";
+    mergedWrapper.dataset.layout =
+      layoutMode === "side-by-side"
+        ? "horizontal"
+        : layoutMode === "natural-stack"
+          ? "natural-stack"
+          : "vertical";
+    mergedWrapper.dataset.layoutMode = layoutMode;
     // Stash the natural dimensions so that nesting this group inside
     // another group (or fitting it into a parent slot after a resize)
     // can scale the whole composite uniformly via `fitCloneIntoSlot`,
@@ -6530,11 +6856,27 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       mergedWrapper.dataset.mergeColTargetH = String(columnMergeTargetH);
       mergedWrapper.dataset.mergeColRef = String(iconSize);
     }
-    const mergedBoxCap = `max-width: ${maxComboW}px; max-height: 90px;`;
+    // Natural-stack groups in a vertical column get a noticeably
+    // bigger top/bottom margin than the standard 4px so neighbouring
+    // groups are clearly separate units — two adjacent groups end up
+    // ~24px apart vs the regular 8px between ungrouped glyphs, well
+    // above the 6px internal gap between glyphs inside a group.
+    // The cross-axis (3px) stays the same so the column itself isn't
+    // wider for groups than for solitary glyphs.
+    const wrapperMargin =
+      layoutMode === "natural-stack" ? "12px 3px" : "4px 3px";
+    // Vertical-stack natural mode doesn't have a fixed cap — the
+    // wrapper is content-sized. Keep the safety cap for quadrat /
+    // side-by-side layouts so a weird combination can't blow out
+    // the line.
+    const mergedBoxCap =
+      layoutMode === "natural-stack"
+        ? ""
+        : `max-width: ${maxComboW}px; max-height: 90px;`;
     mergedWrapper.style.cssText = `
         display: inline-block;
         cursor: text;
-        margin: 4px 3px;
+        margin: ${wrapperMargin};
         vertical-align: middle;
         position: relative;
         width: ${wrapperW}px;
@@ -6578,102 +6920,6 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
 
     scheduleCachePng(mergedWrapper);
     return mergedWrapper;
-  };
-
-  // Re-flow an existing merged-group wrapper to the requested orientation.
-  // Reuses the inner glyph clones, recomputes slot positions, and updates
-  // wrapper / slot / inner-svg dimensions in place.
-  const relayoutMergedIcon = (
-    wrapper: HTMLElement,
-    horizontal: boolean,
-  ): boolean => {
-    // Skip MagicBox-customized groups: their slot positions are user-set
-    // and not derived from the line direction.
-    if (wrapper.dataset.magicbox === "true") return false;
-
-    const slotSpans = (Array.from(wrapper.children) as Element[]).filter(
-      (c): c is HTMLElement => c instanceof HTMLElement,
-    );
-    if (slotSpans.length < 2) return false;
-
-    const sources = slotSpans
-      .map((slot) => slot.firstElementChild as HTMLElement | null)
-      .filter((el): el is HTMLElement => !!el);
-    if (sources.length !== slotSpans.length) return false;
-
-    const baseSize = Number(wrapper.dataset.baseSize) || iconSize;
-    const layout = computeMergedLayout(sources, horizontal, baseSize);
-    if (!layout) return false;
-    const {
-      wrapperW,
-      wrapperH,
-      slotDims,
-      columnMergeTargetW,
-      columnMergeTargetH,
-    } = layout;
-
-    wrapper.style.width = `${wrapperW}px`;
-    wrapper.style.height = `${wrapperH}px`;
-    wrapper.dataset.layout = horizontal ? "horizontal" : "vertical";
-    wrapper.dataset.origWidth = String(wrapperW);
-    wrapper.dataset.origHeight = String(wrapperH);
-
-    if (
-      horizontal &&
-      columnMergeTargetW !== null &&
-      columnMergeTargetH !== null
-    ) {
-      wrapper.dataset.mergeColumnBox = "true";
-      wrapper.dataset.mergeColTargetW = String(columnMergeTargetW);
-      wrapper.dataset.mergeColTargetH = String(columnMergeTargetH);
-      wrapper.dataset.mergeColRef = String(baseSize);
-    } else {
-      delete wrapper.dataset.mergeColumnBox;
-      delete wrapper.dataset.mergeColTargetW;
-      delete wrapper.dataset.mergeColTargetH;
-      delete wrapper.dataset.mergeColRef;
-    }
-
-    slotSpans.forEach((slot, i) => {
-      const dim = slotDims[i];
-      if (!dim) return;
-      slot.style.left = `${dim.left}px`;
-      slot.style.top = `${dim.top}px`;
-      slot.style.width = `${dim.w}px`;
-      slot.style.height = `${dim.h}px`;
-
-      const inner = slot.firstElementChild as HTMLElement | null;
-      if (inner) {
-        fitCloneIntoSlot(inner, dim.w, dim.h);
-      }
-    });
-
-    scheduleCachePng(wrapper);
-    return true;
-  };
-
-  // Walk every merged group in the editor and flip its orientation to
-  // match its current surrounding context (.vertical-run → horizontal,
-  // otherwise → vertical). Called after any vertical-mode toggle so
-  // existing groups stay perpendicular to the line.
-  const relayoutAllMergedIcons = () => {
-    const editor = editorRef.current;
-    if (!editor) return;
-    const merged = editor.querySelectorAll<HTMLElement>(".svg-icon.merged");
-    merged.forEach((m) => {
-      // Skip nested merged groups (a merged inside another merged, if that
-      // ever happens) — they get reflowed via their parent's layout.
-      if (m.parentElement?.closest(".svg-icon.merged")) return;
-      const horizontal = shouldMergedGroupBeHorizontal(m);
-      const currentLayout = m.dataset.layout;
-      if (
-        (horizontal && currentLayout === "horizontal") ||
-        (!horizontal && currentLayout === "vertical")
-      ) {
-        return;
-      }
-      relayoutMergedIcon(m, horizontal);
-    });
   };
 
   const updateAllIconDimensionsForLayout = () => {
@@ -6850,88 +7096,6 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     savedRangeRef.current = range.cloneRange();
   };
 
-  // Set the current selection to span all contents of `el` (inclusive of
-  // the first child's start through the last child's end). Used after
-  // wrap/unwrap so the toggle is reversible without re-selecting.
-  const selectContentsOf = (el: HTMLElement) => {
-    const sel = window.getSelection();
-    if (!sel) return;
-    const first = el.firstChild;
-    const last = el.lastChild;
-    if (!first || !last) return;
-    const newRange = document.createRange();
-    newRange.setStartBefore(first);
-    newRange.setEndAfter(last);
-    sel.removeAllRanges();
-    sel.addRange(newRange);
-    savedRangeRef.current = newRange.cloneRange();
-  };
-
-  // Restore the selection to span the run of nodes from `from` (inclusive)
-  // through `to` (inclusive), which must share the same parent. Used after
-  // unwrapping a vertical-run so the previously-wrapped content stays
-  // selected.
-  const selectRangeOfSiblings = (from: Node, to: Node) => {
-    const sel = window.getSelection();
-    if (!sel) return;
-    const newRange = document.createRange();
-    newRange.setStartBefore(from);
-    newRange.setEndAfter(to);
-    sel.removeAllRanges();
-    sel.addRange(newRange);
-    savedRangeRef.current = newRange.cloneRange();
-  };
-
-  // Wrap the current selection in a `.vertical-run`. If the selection is
-  // already entirely contained in a vertical-run, unwrap that run instead
-  // (toggle off). The selection is preserved across the toggle so the
-  // user can re-click the button to reverse the change.
-  const toggleVerticalForSelection = (range: Range): boolean => {
-    const editor = editorRef.current;
-    if (!editor) return false;
-
-    const enclosingStart = findEnclosingVerticalRun(
-      range.startContainer,
-      editor,
-    );
-    const enclosingEnd = findEnclosingVerticalRun(range.endContainer, editor);
-
-    if (enclosingStart && enclosingStart === enclosingEnd) {
-      const target = enclosingStart;
-      const firstChild = target.firstChild;
-      const lastChild = target.lastChild;
-      unwrapElement(target);
-      if (firstChild && lastChild) {
-        selectRangeOfSiblings(firstChild, lastChild);
-      }
-      return true;
-    }
-
-    try {
-      const fragment = range.extractContents();
-      // Strip nested vertical-run wrappers from the fragment so we don't
-      // produce nested vertical sections that flip orientation back.
-      fragment
-        .querySelectorAll<HTMLElement>("span.vertical-run")
-        .forEach((nested) => unwrapElement(nested));
-
-      if (!fragment.firstChild) return false;
-
-      const wrapper = document.createElement("span");
-      wrapper.className = "vertical-run";
-      wrapper.setAttribute("style", VERTICAL_RUN_CSS);
-      wrapper.appendChild(fragment);
-      range.insertNode(wrapper);
-
-      // Keep the wrapped content selected so the user can click Vertical
-      // Mode again to undo, without having to re-select.
-      selectContentsOf(wrapper);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
   // Wrap every consecutive run of `.svg-icon` siblings in the editor with a
   // `.vertical-run.auto-hilo` span. Whitespace between icons is included so
   // the visual grouping is preserved. Returns the last wrapper created (if any)
@@ -7008,32 +7172,20 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       .forEach((node) => unwrapElement(node));
   };
 
+  // Document-wide vertical-glyph switch. The button is a pure toggle:
+  // pressing it wraps EVERY hieroglyph run in the document in a
+  // `vertical-run.auto-hilo` span (so all glyphs render top-to-bottom),
+  // while leaving plain text alone. Pressing again unwraps them.
+  //
+  // Selection is intentionally ignored — earlier we made this act per-
+  // selection like Bold / Italic, but the client wanted a global
+  // switch instead. Any helpers for selection-based wrapping
+  // (`toggleVerticalForSelection` etc.) are kept in the file for
+  // potential future use but no longer wired to this button.
   const toggleColumnMode = () => {
     if (!editorCanEdit) return;
 
     const editor = editorRef.current;
-    const sel = window.getSelection();
-    const hasSelection =
-      !!editor &&
-      !!sel &&
-      sel.rangeCount > 0 &&
-      !sel.getRangeAt(0).collapsed &&
-      editor.contains(sel.getRangeAt(0).commonAncestorContainer);
-
-    if (hasSelection && sel) {
-      const range = sel.getRangeAt(0);
-      const changed = toggleVerticalForSelection(range);
-      if (changed) {
-        // Merged groups inside the new (or removed) vertical-run need to
-        // flip orientation so they stay perpendicular to the line.
-        relayoutAllMergedIcons();
-        resetTypingHistorySession();
-        commitHistory("push");
-      }
-      editor?.focus();
-      return;
-    }
-
     const nextColumnMode = !columnMode;
     if (nextColumnMode) {
       const lastWrapper = wrapAllHieroglyphRuns();
@@ -7041,7 +7193,15 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     } else {
       unwrapAllAutoHilo();
     }
-    relayoutAllMergedIcons();
+    // Merged groups carry two different layouts:
+    //   • horizontal line → "quadrat" (every glyph crammed into one
+    //     baseSize-tall block, top/bottom flush, shared height).
+    //   • vertical line   → "natural-stack" (each glyph at its natural
+    //     column-mode size, no internal gap, no line-height shrinking).
+    // Flip all existing groups so the toggle applies retroactively —
+    // a group created in horizontal mode shouldn't keep its quadrat
+    // shrinking after the user enters vertical mode.
+    relayoutAllMergedGroupsForColumnMode(nextColumnMode);
     setColumnMode(nextColumnMode);
     resetTypingHistorySession();
     commitHistory("push");
@@ -7184,6 +7344,26 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     }
   };
 
+  // Flatten a merged wrapper into its constituent leaf glyphs so that
+  // re-grouping an existing group with other items produces ONE flat
+  // group instead of a group-of-groups. Cartouches are treated as
+  // atomic (a cartouche with inner glyphs is still a single sign).
+  //
+  // A merged wrapper's children are each a positioning <span>; that
+  // span's firstElementChild is the cloned source glyph (which may
+  // itself be a nested .merged wrapper, hence the recursion).
+  const expandMergedToLeaves = (icon: Element): Element[] => {
+    const el = icon as HTMLElement;
+    if (!el.classList.contains("merged")) return [el];
+    if (el.dataset.cartouche === "true") return [el];
+    const out: Element[] = [];
+    Array.from(el.children).forEach((slot) => {
+      const inner = (slot as HTMLElement).firstElementChild;
+      if (inner) out.push(...expandMergedToLeaves(inner));
+    });
+    return out.length > 0 ? out : [el];
+  };
+
   const mergeGroup = () => {
     if (!editorCanEdit) return;
 
@@ -7233,7 +7413,17 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
     );
 
-    const mergedWrapper = createMergedIcon(iconsToMerge);
+    // Flatten so re-grouping a group never produces a group-of-groups —
+    // the source list still drives DOM removal, but the new merged
+    // wrapper is built from the union of leaf glyphs across every
+    // selected item (single glyphs pass through unchanged, cartouches
+    // stay atomic).
+    const flatLeaves = iconsToMerge.flatMap((ic) =>
+      expandMergedToLeaves(ic),
+    );
+    if (flatLeaves.length < 2) return;
+
+    const mergedWrapper = createMergedIcon(flatLeaves);
     if (!mergedWrapper) return;
 
     const first = iconsToMerge[0] as HTMLElement;
@@ -8450,6 +8640,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
             setDirection={setDirection}
             direction={direction}
             toggleColumnMode={toggleColumnMode}
+            columnMode={columnMode}
             mergeGroup={mergeGroup}
             selectedIconCount={selectedIconCount}
             textSize={textSize}
