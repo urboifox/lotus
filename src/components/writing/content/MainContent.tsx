@@ -121,6 +121,12 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
   const [selectedIcons, setSelectedIcons] = useState<Element[]>([]);
   const [direction, setDirection] = useState<"ltr" | "rtl">("ltr");
   const [columnMode, setColumnMode] = useState(false);
+  // Mirror of columnMode for callbacks that might capture a stale value
+  // (palette click handlers pass through a few prop hops, and React batches
+  // state updates, so the function reference handed to a child can lag
+  // behind the actual toggle by one render). Read this inside insertion
+  // paths so the vertical lock always reflects the latest toggle.
+  const columnModeRef = useRef(false);
   const [selectedIconCount, setSelectedIconCount] = useState(0);
   const [textSize, setTextSize] = useState(18);
   const [iconSize, setIconSize] = useState(39);
@@ -4587,26 +4593,41 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     const wrapper = createSvgWrapper(svgString, pictureSize);
     const sel = window.getSelection();
 
+    let inserted = false;
     if (sel && sel.rangeCount > 0) {
       const range = sel.getRangeAt(0);
       if (editor.contains(range.commonAncestorContainer)) {
         range.deleteContents();
         range.insertNode(wrapper);
-
-        range.setStartAfter(wrapper);
-        range.collapse(true);
-        sel.removeAllRanges();
-        sel.addRange(range);
-        savedRangeRef.current = range.cloneRange();
-        scrollElementIntoView(wrapper);
-      } else {
-        editor.appendChild(wrapper);
-        scrollElementIntoView(wrapper);
+        inserted = true;
       }
-    } else {
-      editor.appendChild(wrapper);
-      scrollElementIntoView(wrapper);
     }
+    if (!inserted) {
+      editor.appendChild(wrapper);
+    }
+
+    // Global vertical lock: when columnMode is on, any glyph inserted
+    // anywhere in the doc gets adopted by a `.vertical-run` so it
+    // renders in a column. Without this, glyphs added into an empty
+    // editor, or onto a fresh line created by Enter (which deliberately
+    // exits any enclosing vertical-run), would land as horizontal text
+    // and the toggle would feel like it forgot the user's choice.
+    // Read from the ref so a freshly-flipped toggle takes effect on
+    // the very next palette click — closure capture isn't enough since
+    // the palette click handler may have been bound on an earlier render.
+    if (columnModeRef.current) {
+      ensureGlyphInVerticalRun(wrapper);
+    }
+
+    if (sel) {
+      const newRange = document.createRange();
+      newRange.setStartAfter(wrapper);
+      newRange.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(newRange);
+      savedRangeRef.current = newRange.cloneRange();
+    }
+    scrollElementIntoView(wrapper);
 
     editor.focus();
     commitHistory("push");
@@ -4965,6 +4986,12 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         const wrapper = createSvgWrapper(svgString);
         range.insertNode(wrapper);
 
+        // Honour the global vertical lock for drops the same way
+        // insertSvgAtCursor does for direct insertions.
+        if (columnModeRef.current) {
+          ensureGlyphInVerticalRun(wrapper);
+        }
+
         range.setStartAfter(wrapper);
         range.collapse(true);
         scrollElementIntoView(wrapper);
@@ -4978,6 +5005,10 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       draggedElement.remove();
       draggedElement.style.opacity = "1";
       range.insertNode(draggedElement);
+
+      if (columnModeRef.current) {
+        ensureGlyphInVerticalRun(draggedElement);
+      }
 
       range.setStartAfter(draggedElement);
       range.collapse(true);
@@ -5925,6 +5956,19 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         range.collapse(true);
       } else {
         editor.appendChild(nodeToInsert);
+      }
+
+      // Honour the global vertical lock for pasted glyphs.
+      if (
+        columnModeRef.current &&
+        nodeToInsert instanceof HTMLElement &&
+        nodeToInsert.classList.contains("svg-icon")
+      ) {
+        ensureGlyphInVerticalRun(nodeToInsert);
+        if (range) {
+          range.setStartAfter(nodeToInsert);
+          range.collapse(true);
+        }
       }
 
       lastNode = nodeToInsert;
@@ -7164,6 +7208,48 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     return lastWrapper;
   };
 
+  // Make sure `glyph` lives inside a `.vertical-run.auto-hilo` wrapper.
+  // Used when columnMode is on and a glyph was just inserted at the
+  // caret (which has no idea about the global vertical lock). If the
+  // glyph's previous sibling is already an auto-hilo run we extend it;
+  // otherwise we create a fresh run wrapping just this glyph. This is
+  // how the vertical button keeps acting as a "lock" — every new glyph
+  // gets wrapped, regardless of whether the editor was empty, the
+  // caret is post-Enter on a fresh line, etc.
+  const ensureGlyphInVerticalRun = (glyph: HTMLElement): HTMLElement => {
+    const existing = glyph.closest(".vertical-run") as HTMLElement | null;
+    if (existing) return existing;
+
+    const prev = glyph.previousSibling;
+    if (
+      prev instanceof HTMLElement &&
+      prev.classList.contains("vertical-run") &&
+      prev.classList.contains("auto-hilo")
+    ) {
+      prev.appendChild(glyph);
+      return prev;
+    }
+
+    const next = glyph.nextSibling;
+    if (
+      next instanceof HTMLElement &&
+      next.classList.contains("vertical-run") &&
+      next.classList.contains("auto-hilo")
+    ) {
+      next.insertBefore(glyph, next.firstChild);
+      return next;
+    }
+
+    const parent = glyph.parentNode;
+    if (!parent) return glyph;
+    const run = document.createElement("span");
+    run.className = "vertical-run auto-hilo";
+    run.setAttribute("style", VERTICAL_RUN_CSS);
+    parent.insertBefore(run, glyph);
+    run.appendChild(glyph);
+    return run;
+  };
+
   const unwrapAllAutoHilo = () => {
     const editor = editorRef.current;
     if (!editor) return;
@@ -7202,6 +7288,9 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     // a group created in horizontal mode shouldn't keep its quadrat
     // shrinking after the user enters vertical mode.
     relayoutAllMergedGroupsForColumnMode(nextColumnMode);
+    // Update the ref synchronously so insertion handlers triggered
+    // before React has finished re-rendering still see the new value.
+    columnModeRef.current = nextColumnMode;
     setColumnMode(nextColumnMode);
     resetTypingHistorySession();
     commitHistory("push");
@@ -7209,6 +7298,7 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
   };
 
   useEffect(() => {
+    columnModeRef.current = columnMode;
     updateAllIconTransforms();
     updateAllIconDimensionsForLayout();
     // eslint-disable-next-line react-hooks/exhaustive-deps
