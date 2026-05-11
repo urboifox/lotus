@@ -5951,6 +5951,85 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
     columnMergeTargetH: number | null;
   };
 
+  // Classify a source glyph as "small" — JSesh-style "small" signs are
+  // visibly less than full-quadrat on BOTH axes (e.g. tiny dots, hash
+  // marks). In our model that's any glyph whose `picture_size` is below
+  // 100 AND whose intrinsic aspect ratio is roughly square (~1). The
+  // squareness gate is critical: horizontal signs (AR > ~1.5) and
+  // vertical/staff signs (AR < ~0.67) also commonly carry ps != 100 to
+  // express their "low" / "narrow" category, but the user explicitly
+  // wants those to keep filling their slot in groups (this is what the
+  // previous fix achieved for horizontal stacks). Only true smalls
+  // should refuse to grow.
+  //
+  // Composite atoms (merged groups, cartouches) are never "small" — we
+  // always want their entire frame to fit the slot.
+  const SMALL_AR_MIN = 0.7;
+  const SMALL_AR_MAX = 1.4;
+  const SMALL_PS_MAX = 95;
+
+  const readIconAspect = (el: HTMLElement): { arW: number; arH: number } => {
+    let arW = Number(el.dataset.arW);
+    let arH = Number(el.dataset.arH);
+    if (
+      !Number.isFinite(arW) ||
+      !Number.isFinite(arH) ||
+      arW <= 0 ||
+      arH <= 0
+    ) {
+      const svg = el.querySelector("svg") as SVGSVGElement | null;
+      if (svg) {
+        const vb = svg.getAttribute("viewBox");
+        if (vb) {
+          const p = vb.trim().split(/[\s,]+/);
+          arW = parseFloat(p[2]) || 100;
+          arH = parseFloat(p[3]) || 100;
+        }
+      }
+      if (!Number.isFinite(arW) || arW <= 0) arW = 100;
+      if (!Number.isFinite(arH) || arH <= 0) arH = 100;
+    }
+    return { arW, arH };
+  };
+
+  const isSmallIcon = (icon: Element): boolean => {
+    const el = icon as HTMLElement;
+    if (el.classList.contains("merged")) return false;
+    if (el.dataset.cartouche === "true") return false;
+    const ps = Number(el.dataset.pictureSize) || 100;
+    if (ps >= SMALL_PS_MAX) return false;
+    const { arW, arH } = readIconAspect(el);
+    const ar = arW / arH;
+    return ar >= SMALL_AR_MIN && ar <= SMALL_AR_MAX;
+  };
+
+  // Natural rendered size for a small glyph at the given `baseSize`.
+  // `picture_size` is the relative-size attribute coming from the
+  // backend (100 = fills the quadrat, smaller = proportionally smaller
+  // on the dominant axis). For a square-ish small sign we use that
+  // fraction for both axes with a mild AR adjustment, capping at
+  // baseSize so a pathological ps>100 doesn't blow out the quadrat.
+  const getSmallIntrinsicSize = (
+    icon: Element,
+    baseSize: number,
+  ): { w: number; h: number } => {
+    const el = icon as HTMLElement;
+    const ps = Math.max(1, Number(el.dataset.pictureSize) || 100);
+    const { arW, arH } = readIconAspect(el);
+    const ar = arW / arH;
+    const dim = Math.max(4, Math.round((ps / 100) * baseSize));
+    let w: number;
+    let h: number;
+    if (ar >= 1) {
+      h = dim;
+      w = Math.min(baseSize, Math.round(dim * ar));
+    } else {
+      w = dim;
+      h = Math.min(baseSize, Math.round(dim / ar));
+    }
+    return { w, h };
+  };
+
   const computeMergedLayout = (
     icons: Element[],
     horizontal: boolean,
@@ -6029,12 +6108,15 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         return ew / eh;
       });
 
+    // Critical invariant (matches JSesh's quadrat model): every merged
+    // group occupies a FULL line-height block, regardless of how many
+    // or what shape of glyphs it contains. Two horizontal "low" glyphs
+    // grouped side-by-side still produce a baseSize-tall wrapper —
+    // the glyphs themselves scale and center inside it. Without this,
+    // grouped horizontals shrank to a sliver while neighbouring
+    // un-grouped glyphs kept their full line height, so lines became
+    // visually staggered.
     if (horizontal) {
-      // Side-by-side: anchor the target box to baseSize × baseSize. We
-      // intentionally don't measure the source icons' bounding rects —
-      // for relayouts, the sources are already slot-sized clones, and
-      // reading their rects produces a shrunken box. baseSize keeps the
-      // group's horizontal dimensions stable across orientation flips.
       const targetW = Math.round(Math.min(90, Math.max(12, baseSize)));
       const targetH = Math.round(Math.min(90, Math.max(12, baseSize)));
       columnMergeTargetW = targetW;
@@ -6044,66 +6126,218 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
       const heightCap = Math.min(90, baseSize);
       const desiredH = Math.min(targetH, heightCap);
 
-      const rawWidths = aspectRatios.map((ar) => desiredH * ar);
-      const totalW = rawWidths.reduce((s, w) => s + w, 0);
+      // Mirror of the vertical branch but rotated 90°: small signs
+      // keep their intrinsic width, non-smalls fill the remaining
+      // horizontal space. All-same groups still get a proportional
+      // (AR-driven) layout that may shrink to fit.
+      const smallFlags = icons.map((icon) => isSmallIcon(icon));
+      const smallIntrinsics = icons.map((icon, i) =>
+        smallFlags[i] ? getSmallIntrinsicSize(icon, baseSize) : null,
+      );
+      const allSame =
+        smallFlags.every((s) => s) || smallFlags.every((s) => !s);
+
       const totalGapsW = (n - 1) * INTERNAL_GAP;
       const usableW = Math.max(1, targetW - totalGapsW);
-      const scale = totalW > usableW ? usableW / totalW : 1;
-      const finalH = desiredH * scale;
-      const contentW = totalW * scale + totalGapsW;
+
+      let slotWidths: number[];
+      let finalH: number;
+
+      if (allSame) {
+        const rawWidths = aspectRatios.map((ar) => desiredH * ar);
+        const totalW = rawWidths.reduce((s, w) => s + w, 0);
+        const scale = totalW > usableW ? usableW / totalW : 1;
+        slotWidths = rawWidths.map((rw) => rw * scale);
+        finalH = desiredH * scale;
+      } else {
+        // Mixed: smalls get their natural width; non-smalls share the
+        // remaining horizontal space proportionally to their AR (at
+        // full height) so the bigger sibling absorbs the empty space.
+        const smallWidthSum = smallIntrinsics.reduce(
+          (sum, dims) => sum + (dims ? dims.w : 0),
+          0,
+        );
+        const nonSmallIndices: number[] = [];
+        for (let i = 0; i < n; i++) {
+          if (!smallFlags[i]) nonSmallIndices.push(i);
+        }
+        const remaining = Math.max(1, usableW - smallWidthSum);
+        const nonSmallAspectSum = nonSmallIndices.reduce(
+          (s, i) => s + aspectRatios[i],
+          0,
+        );
+
+        slotWidths = new Array(n);
+        for (let i = 0; i < n; i++) {
+          if (smallFlags[i]) {
+            slotWidths[i] = Math.min(
+              baseSize,
+              (smallIntrinsics[i] as { w: number; h: number }).w,
+            );
+          } else {
+            // Distribute by AR so wider non-smalls take more of the
+            // remaining width; falls back to equal split if AR sum
+            // is zero (shouldn't happen but stays safe).
+            const share =
+              nonSmallAspectSum > 0
+                ? aspectRatios[i] / nonSmallAspectSum
+                : 1 / nonSmallIndices.length;
+            slotWidths[i] = Math.max(1, remaining * share);
+          }
+        }
+        finalH = desiredH;
+      }
+
+      const contentW =
+        slotWidths.reduce((s, w) => s + w, 0) + totalGapsW;
       const offsetX = (targetW - contentW) / 2;
-      const offsetY = 0;
+      // Anchor the scaled content to the *bottom* of the quadrat so
+      // horizontal "low" glyphs sit on the baseline (where they'd sit
+      // un-grouped), instead of floating in the middle. Tall glyphs
+      // that already fill the quadrat are unaffected (finalH == targetH).
+      const offsetY = Math.max(0, targetH - finalH);
 
       wrapperW = targetW;
-      wrapperH = Math.max(1, Math.round(finalH));
+      // Always full line height — content occupies (offsetY..targetH).
+      wrapperH = targetH;
 
       let cursor = offsetX;
-      slotDims = rawWidths.map((rw) => {
-        const sw = rw * scale;
-        const dim = { w: sw, h: finalH, left: cursor, top: offsetY };
+      slotDims = slotWidths.map((sw, i) => {
+        // Small slots keep their intrinsic height too (the artwork is
+        // centered vertically inside via fitCloneIntoSlot).
+        const slotH = smallFlags[i]
+          ? Math.min(
+              finalH,
+              (smallIntrinsics[i] as { w: number; h: number }).h,
+            )
+          : finalH;
+        const slotTop = offsetY + (finalH - slotH);
+        const dim = { w: sw, h: slotH, left: cursor, top: slotTop };
         cursor += sw + INTERNAL_GAP;
         return dim;
       });
     } else {
-      // Vertical stack: wrapper width = baseSize; max total height 90px
-      // (mirrors the horizontal max-width cap).
+      // Vertical stack — JSesh's quadrat model for stacked glyphs.
+      //
+      // Default rule: every slot gets an EQUAL share of the line
+      // height (`baseSize / n`, minus the inter-slot gap), regardless
+      // of how wide any individual glyph in the stack is. Two grouped
+      // horizontal "low" glyphs each get 50%, three each get 33%, etc.
+      // The glyph's own AR is honoured by `fitCloneIntoSlot` —
+      // wide/tall ones letterbox inside their slot via
+      // `preserveAspectRatio: meet`.
+      //
+      // Exception for SMALL signs (dots, small marks): those should
+      // keep their natural size in groups instead of being inflated to
+      // fill a baseSize/n slot. So:
+      //   • All-small group: equal slots, small artwork stays at its
+      //     intrinsic size *centered inside the slot* (handled by
+      //     fitCloneIntoSlot — slot allocation is unchanged here).
+      //   • Mixed group (smalls + non-smalls): smalls take a slot
+      //     exactly as tall as their intrinsic height; the remaining
+      //     height (minus gaps) is split equally between the
+      //     non-smalls so they grow to absorb the unused space.
+      //
+      // Result the client asked for:
+      //   • 2 horizontals → 50% / 50%
+      //   • 3 horizontals → 33% / 33% / 33%
+      //   • 2 smalls → 50% / 50% slots, artwork stays small (centered)
+      //   • small + horizontal → small at intrinsic, horizontal fills
+      //     the rest of the quadrat
       const MAX_GROUP_H = 90;
       const aspectRatios = readAspectRatios();
-
-      // Gap is held in *screen* pixels and is never scaled with content.
-      // Earlier the gap was multiplied by `wScale`/`hScale`, which made
-      // tall cartouches inside vertical groups end up with a sub-pixel
-      // gap to their neighbours (effectively touching).
       const gapH = INTERNAL_GAP;
       const totalGapsH = (n - 1) * gapH;
-      const slotH0 = Math.max(1, (baseSize - totalGapsH) / n);
-      const rawWidths = aspectRatios.map((ar) => slotH0 * ar);
-      const maxRw = Math.max(...rawWidths, 1);
-      const wScale = maxRw > baseSize ? baseSize / maxRw : 1;
-      let slotH = slotH0 * wScale;
-      let scaledWidths = rawWidths.map((w) => w * wScale);
-      wrapperW = baseSize;
-      wrapperH = n * slotH + totalGapsH;
 
-      if (wrapperH > MAX_GROUP_H) {
-        // Re-derive slotH so wrapperH fits MAX_GROUP_H, *with the gap
-        // preserved*. Without this guard, a very tall stack would push
-        // the slots into negative height — bail to a 1px floor in that
-        // pathological case.
-        const availForSlots = Math.max(1, MAX_GROUP_H - totalGapsH);
-        const hScale = availForSlots / (n * slotH);
-        slotH = Math.max(1, slotH * hScale);
-        scaledWidths = scaledWidths.map((w) => w * hScale);
-        wrapperW = Math.min(Math.round(baseSize * hScale), maxComboW);
-        wrapperH = MAX_GROUP_H;
+      const smallFlags = icons.map((icon) => isSmallIcon(icon));
+      const smallIntrinsics = icons.map((icon, i) =>
+        smallFlags[i] ? getSmallIntrinsicSize(icon, baseSize) : null,
+      );
+      const allSame =
+        smallFlags.every((s) => s) || smallFlags.every((s) => !s);
+
+      const slotHeights: number[] = new Array(n);
+
+      if (allSame) {
+        // Uniform group — split the quadrat evenly. For all-small
+        // groups, fitCloneIntoSlot will keep the artwork at intrinsic
+        // size and center it inside the (larger) slot.
+        const equalH = Math.max(1, (baseSize - totalGapsH) / n);
+        for (let i = 0; i < n; i++) slotHeights[i] = equalH;
+      } else {
+        // Mixed group: smalls keep their natural height; non-smalls
+        // share the remainder so the bigger sibling absorbs the
+        // empty space a small would otherwise leave.
+        const smallCount = smallFlags.filter((s) => s).length;
+        const nonSmallCount = n - smallCount;
+        const totalSmallH = smallIntrinsics.reduce(
+          (sum, dims) => sum + (dims ? dims.h : 0),
+          0,
+        );
+        const remaining = Math.max(
+          1,
+          baseSize - totalSmallH - totalGapsH,
+        );
+        const nonSmallH = Math.max(1, remaining / nonSmallCount);
+        for (let i = 0; i < n; i++) {
+          slotHeights[i] = smallFlags[i]
+            ? (smallIntrinsics[i] as { w: number; h: number }).h
+            : nonSmallH;
+        }
       }
 
-      slotDims = scaledWidths.map((slotW, i) => ({
-        w: slotW,
-        h: slotH,
-        left: (wrapperW - slotW) / 2,
-        top: i * (slotH + gapH),
-      }));
+      // Slot widths: smalls keep their intrinsic width (so they
+      // render at their natural size, not stretched to fill); non-
+      // smalls follow the glyph's AR at the slot height (capped at
+      // baseSize so a very wide glyph still fits the quadrat).
+      const slotWidths = slotHeights.map((sh, i) => {
+        if (smallFlags[i]) {
+          return Math.min(
+            baseSize,
+            (smallIntrinsics[i] as { w: number; h: number }).w,
+          );
+        }
+        return Math.min(baseSize, sh * aspectRatios[i]);
+      });
+
+      wrapperW = baseSize;
+      wrapperH = baseSize;
+      let contentH = slotHeights.reduce((s, h) => s + h, 0) + totalGapsH;
+
+      if (contentH > MAX_GROUP_H) {
+        // Pathological — overflow the line cap. Scale all slots
+        // (including small ones) uniformly so the stack still fits.
+        // Note: this only fires when the natural sum already exceeds
+        // baseSize, which shouldn't happen with the equal-slot or
+        // small+nonSmall rules above, so this is just a safety net.
+        const availForSlots = Math.max(1, MAX_GROUP_H - totalGapsH);
+        const hScale = availForSlots / (contentH - totalGapsH);
+        for (let i = 0; i < n; i++) {
+          slotHeights[i] = Math.max(1, slotHeights[i] * hScale);
+          slotWidths[i] *= hScale;
+        }
+        wrapperW = Math.min(Math.round(baseSize * hScale), maxComboW);
+        wrapperH = MAX_GROUP_H;
+        contentH = slotHeights.reduce((s, h) => s + h, 0) + totalGapsH;
+      }
+
+      // contentH typically equals baseSize so the stack fills the
+      // line from top to bottom (offsetY = 0). All-small groups also
+      // hit this branch because their slot heights sum to baseSize.
+      const offsetY = Math.max(0, wrapperH - contentH);
+
+      let cursorTop = offsetY;
+      slotDims = slotHeights.map((sh, i) => {
+        const sw = slotWidths[i];
+        const dim = {
+          w: sw,
+          h: sh,
+          left: (wrapperW - sw) / 2,
+          top: cursorTop,
+        };
+        cursorTop += sh + gapH;
+        return dim;
+      });
 
       const minL = Math.min(...slotDims.map((s) => s.left));
       const maxR = Math.max(...slotDims.map((s) => s.left + s.w));
@@ -6190,6 +6424,38 @@ export default function MainContent({ shareToken, sharedDocumentId }: MainConten
         transform: scale(${scale});
         transform-origin: top left;
       `;
+      return;
+    }
+
+    // Small signs keep their natural pixel size inside the slot.
+    // Stretching them to fill an equal-share slot is what made dot-
+    // shaped glyphs balloon to half a line of height when grouped;
+    // instead we render at the intrinsic (picture_size-scaled) box
+    // and center inside whatever slot we were given.
+    if (isSmallIcon(clone)) {
+      const baseFromData = Number(clone.dataset.baseSize);
+      const base =
+        Number.isFinite(baseFromData) && baseFromData > 0
+          ? baseFromData
+          : iconSize;
+      const { w: natW, h: natH } = getSmallIntrinsicSize(clone, base);
+      const w = Math.min(slotW, natW);
+      const h = Math.min(slotH, natH);
+      clone.style.cssText = `
+        position: absolute;
+        top: ${(slotH - h) / 2}px;
+        left: ${(slotW - w) / 2}px;
+        width: ${w}px;
+        height: ${h}px;
+      `;
+      const innerSmall = clone.querySelector("svg") as SVGElement | null;
+      if (innerSmall) {
+        innerSmall.removeAttribute("width");
+        innerSmall.removeAttribute("height");
+        (innerSmall.style as CSSStyleDeclaration).width = `${w}px`;
+        (innerSmall.style as CSSStyleDeclaration).height = `${h}px`;
+        innerSmall.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      }
       return;
     }
 

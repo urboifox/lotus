@@ -1,0 +1,3 @@
+- any glyph inside a group should be in the same size
+- grouping vertical and horizontal icons
+- grouping a groups merges the both
