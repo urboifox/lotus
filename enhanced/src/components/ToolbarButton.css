@@ -1,0 +1,42 @@
+.tb-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #5b4126;
+  background: transparent;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 80ms ease, border-color 80ms ease, transform 80ms ease;
+  min-height: 30px;
+  font-family: inherit;
+}
+
+.tb-btn:hover:not(.tb-btn--disabled) {
+  background: #fff6e3;
+  border-color: #d8a865;
+}
+
+.tb-btn:active:not(.tb-btn--disabled) {
+  transform: translateY(1px);
+}
+
+.tb-btn--active {
+  background: #d4a574;
+  color: white;
+  border-color: #d4a574;
+}
+
+.tb-btn--active:hover {
+  background: #ccaa83;
+  border-color: #ccaa83;
+}
+
+.tb-btn--disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

@@ -1,0 +1,81 @@
+/* --------------------------------------------------------------------------
+ *  Editor pane styling.
+ *
+ *  The whole pane is a contenteditable text surface. The `.hg-text` font
+ *  stack puts the hieroglyph font FIRST so any codepoint in the
+ *  U+13000-U+1345F blocks resolves to NewGardiner; everything else
+ *  falls through to Inter. That single rule is all we need to mix
+ *  Latin and hieroglyphs in the same paragraph.
+ *
+ *  Rotated glyphs get a CSS transform applied to a `<span>` carrying
+ *  the `data-hiero-rotation` attribute (see marks/HieroRotation.ts).
+ *  We compose `inline-block` so the transform doesn't push neighbours
+ *  out of place, plus a transparent baseline so the glyph keeps the
+ *  same visual position as its un-rotated peers.
+ * ------------------------------------------------------------------------ */
+
+.lotus-editor-host {
+  position: relative;
+  height: 100%;
+  overflow: auto;
+  background: #fffaf2;
+  border-radius: 0 0 6px 6px;
+}
+
+.lotus-editor-host[data-direction="rtl"] .lotus-editor {
+  direction: rtl;
+}
+
+.lotus-editor {
+  font-family: "Hieroglyphic", "Inter", "Noto Sans Egyptian Hieroglyphs",
+    system-ui, -apple-system, sans-serif;
+  font-feature-settings: normal;
+  font-variant-ligatures: none;
+  outline: none;
+  padding: 32px 40px;
+  min-height: 100%;
+  color: #1f2937;
+  caret-color: #d8a865;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.lotus-editor p {
+  margin: 0 0 0.6em;
+}
+
+.lotus-editor p:last-child {
+  margin-bottom: 0;
+}
+
+.lotus-editor ::selection {
+  background: rgba(216, 168, 101, 0.35);
+}
+
+.lotus-editor strong {
+  font-weight: 700;
+}
+
+/* ----- Per-glyph rotation -------------------------------------------------
+ *
+ * The HieroRotation Mark renders as `<span class="hiero-rot"
+ * data-hiero-rotation="<deg>">…</span>`. CSS picks the angle off the
+ * attribute via a custom property the mark sets inline, so we don't
+ * need a class per angle. */
+
+.hiero-rot {
+  display: inline-block;
+  transform: rotate(var(--hiero-rot, 0deg));
+  transform-origin: center;
+}
+
+/* ----- Empty paragraph placeholder ---------------------------------------- */
+
+.lotus-editor p.is-empty:first-child::before {
+  content: "Start typing or click a glyph on the left.";
+  color: #b08d5e;
+  pointer-events: none;
+  height: 0;
+  float: left;
+}

@@ -1,0 +1,127 @@
+.color-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 220px;
+}
+
+.color-popover__label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #8a6a3d;
+}
+
+.color-popover__grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+}
+
+.color-popover__swatch {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+  transition: transform 80ms ease, border-color 80ms ease;
+}
+
+.color-popover__swatch:hover {
+  border-color: #d8a865;
+  transform: translateY(-1px);
+}
+
+.color-popover__swatch--active {
+  border-color: #d4a574;
+  box-shadow: 0 0 0 2px rgba(216, 168, 101, 0.45),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
+.color-popover__custom {
+  display: grid;
+  grid-template-columns: auto 32px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.color-popover__custom-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #5b4126;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.color-popover__input {
+  /* The browser's native swatch has its own chrome — strip our
+     border so it sits flush. Keep a hairline outline on focus. */
+  width: 32px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.color-popover__input::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.color-popover__input::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+
+.color-popover__input:focus {
+  outline: none;
+  border-color: #d8a865;
+  box-shadow: 0 0 0 2px rgba(216, 168, 101, 0.25);
+}
+
+.color-popover__hex {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #5b4126;
+  letter-spacing: 0.02em;
+}
+
+.color-popover__clear {
+  align-self: flex-start;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 500;
+  color: #5b4126;
+  background: transparent;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 80ms ease, border-color 80ms ease;
+}
+
+.color-popover__clear:hover:not(:disabled) {
+  background: #fff6e3;
+  border-color: #d8a865;
+}
+
+.color-popover__clear:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Small swatch inside the toolbar trigger button. Sits next to the
+ * "Color" label so the current pick is visible at a glance. */
+.color-popover__trigger-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -2px;
+  border: 1px solid rgba(31, 41, 55, 0.25);
+  border-radius: 3px;
+}

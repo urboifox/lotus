@@ -1,0 +1,49 @@
+/* --------------------------------------------------------------------------
+ *  Global reset + base typography.
+ *
+ *  Hieroglyph signs in the editor pane are just text — the
+ *  `Hieroglyphic` font face (NewGardiner.otf, declared by HieroJax's
+ *  stylesheet) handles their visual rendering. Quadrat layout is the
+ *  Preview pane's responsibility; this stylesheet only handles the
+ *  global page chrome and a small `.hg` helper for the palette
+ *  previews and brand mark.
+ * ------------------------------------------------------------------------ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  color: #1f2937;
+  background: #f7f4ee;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font-family: inherit;
+}
+
+/* `.hg` is used by the palette tiles and the brand mark to render a
+   single hieroglyph in a known size. We use HieroJax's "Hieroglyphic"
+   font face (loaded via /hierojax/hierojax.css) so palette tiles look
+   identical to the in-editor signs. */
+.hg {
+  font-family: "Hieroglyphic", "Noto Sans Egyptian Hieroglyphs",
+    "Segoe UI Historic", serif;
+  font-feature-settings: normal;
+  font-variant-ligatures: none;
+  line-height: 1;
+}

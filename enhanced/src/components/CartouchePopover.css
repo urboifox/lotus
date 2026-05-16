@@ -1,0 +1,64 @@
+.cartouche-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 300px;
+}
+
+.cartouche-popover__label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #8a6a3d;
+}
+
+.cartouche-popover__grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.cartouche-popover__tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px;
+  background: #fffaf2;
+  border: 1px solid #e5d8c1;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 80ms ease, border-color 80ms ease;
+}
+
+.cartouche-popover__tile:hover {
+  background: #fff6e3;
+  border-color: #d8a865;
+}
+
+.cartouche-popover__tile--active {
+  background: #fbeacc;
+  border-color: #d4a574;
+}
+
+.cartouche-popover__sample {
+  font-family: "Hieroglyphic", serif;
+  font-size: 20px;
+  line-height: 1;
+  display: inline-block;
+  min-height: 26px;
+}
+
+.cartouche-popover__name {
+  font-size: 11px;
+  font-weight: 500;
+  color: #5b4126;
+}
+
+.cartouche-popover__hint {
+  margin: 0;
+  font-size: 10px;
+  color: #b08d5e;
+}
