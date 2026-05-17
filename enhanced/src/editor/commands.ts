@@ -32,8 +32,11 @@
 import {
   CARTOUCHE_CLOSE,
   CARTOUCHE_OPEN,
+  DAMAGE_BASE,
   HORIZONTAL_JOINER,
   VERTICAL_JOINER,
+  damageChar,
+  isHieroDamage,
   isHieroFormat,
   isHieroSign,
 } from "./unicode";
@@ -173,6 +176,11 @@ const isHieroFormatChar = (ch: string): boolean => {
   return cp != null && isHieroFormat(cp);
 };
 
+const isHieroDamageChar = (ch: string): boolean => {
+  const cp = ch.codePointAt(0);
+  return cp != null && isHieroDamage(cp);
+};
+
 /** Insert `joiner` between every adjacent pair of hieroglyph signs
  *  in `s`, replacing any joiner already there. Other format-controls
  *  (cartouche / segment delimiters) are left alone, so wrapping
@@ -210,8 +218,73 @@ export const groupHorizontal: RangeCommand = (s) =>
   buildEdit(joinSigns(s, HORIZONTAL_JOINER), s);
 
 export const ungroup: RangeCommand = (s) => {
-  const next = [...s].filter((ch) => !isHieroFormatChar(ch)).join("");
+  // Damage markers are technically format-controls but conceptually
+  // belong TO the sign they follow — stripping them on an "Ungroup"
+  // would silently delete the user's shading state. Preserve them.
+  const next = [...s]
+    .filter((ch) => !isHieroFormatChar(ch) || isHieroDamageChar(ch))
+    .join("");
   return buildEdit(next, s);
+};
+
+/* ----- Damage (per-sign shading) ----------------------------------------
+ *
+ * Damage is a 4-bit "which quarters are shaded" attribute per sign.
+ * Level 0 = clean. Levels 1..15 are stored as a single codepoint
+ * (U+13447 + (level-1) ... see unicode.ts). The marker sits
+ * immediately after the sign codepoint and is consumed by HieroJax's
+ * parser as a property of that sign.
+ *
+ * `setDamage` walks the selection and, for every sign codepoint,
+ * rewrites the damage marker that follows it (inserting one if there
+ * was none). Passing level 0 strips every damage marker in the range.
+ * Idempotent — re-applying the same level is a no-op. */
+
+/** Append (or replace) a damage marker after every sign in `s`.
+ *  Other characters are kept verbatim so joiners / cartouche caps /
+ *  Latin text all survive a shading operation. */
+const applyDamage = (s: string, level: number): string => {
+  const out: string[] = [];
+  const cps = [...s];
+  for (let i = 0; i < cps.length; i++) {
+    const ch = cps[i];
+    out.push(ch);
+    if (!isHieroSignChar(ch)) continue;
+    // Skip any existing damage marker (always a single codepoint).
+    if (i + 1 < cps.length && isHieroDamageChar(cps[i + 1])) i++;
+    if (level > 0) out.push(damageChar(level));
+  }
+  return out.join("");
+};
+
+/** Toolbar-facing command: produces the new range text for the chosen
+ *  damage level. */
+export const setDamage = (level: number): RangeCommand => (s) =>
+  buildEdit(applyDamage(s, level), s);
+
+/** Damage level shared by every sign in `s`, or null if signs disagree
+ *  (or there are no signs at all). Drives the popover's active tile. */
+export const detectDamage = (s: string): number | null => {
+  let seen: number | null = null;
+  const cps = [...s];
+  for (let i = 0; i < cps.length; i++) {
+    if (!isHieroSignChar(cps[i])) continue;
+    let level = 0;
+    if (i + 1 < cps.length && isHieroDamageChar(cps[i + 1])) {
+      const cp = cps[i + 1].codePointAt(0)!;
+      level = cp - DAMAGE_BASE;
+      i++;
+    }
+    if (seen == null) seen = level;
+    else if (seen !== level) return null;
+  }
+  return seen;
+};
+
+/** True if any sign in `s` carries a damage marker. */
+export const hasDamage = (s: string): boolean => {
+  for (const ch of s) if (isHieroDamageChar(ch)) return true;
+  return false;
 };
 
 /** True if `s` is bracketed by `variant.open` / `variant.close`. */
@@ -256,9 +329,13 @@ export const hasHieroSign = (s: string): boolean => {
   return false;
 };
 
-/** Any joiner / enclosure / segment format-control codepoint. */
+/** Any joiner / enclosure / segment format-control codepoint.
+ *  Excludes damage markers, since `Ungroup` preserves those — gating
+ *  the button on them would let the user click a no-op. */
 export const hasFormatControl = (s: string): boolean => {
-  for (const ch of s) if (isHieroFormatChar(ch)) return true;
+  for (const ch of s) {
+    if (isHieroFormatChar(ch) && !isHieroDamageChar(ch)) return true;
+  }
   return false;
 };
 

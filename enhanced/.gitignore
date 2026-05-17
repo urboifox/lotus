@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Smoke-test artifacts dumped by scripts/verify-smoke.mjs
+scripts/_*.png
+scripts/_*.svg
+scripts/_*.html
+

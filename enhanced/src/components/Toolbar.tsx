@@ -25,10 +25,12 @@ import { TextSelection } from "@tiptap/pm/state";
 import { CartouchePopover } from "./CartouchePopover";
 import { ColorPopover } from "./ColorPopover";
 import { RotatePopover } from "./RotatePopover";
+import { ShadingPopover } from "./ShadingPopover";
 import { ToolbarButton } from "./ToolbarButton";
 import {
   CARTOUCHE_VARIANTS,
   detectCartouche,
+  detectDamage,
   groupHorizontal,
   groupVertical,
   hasFormatControl,
@@ -221,6 +223,7 @@ export const Toolbar = ({
               ? colorMark.attrs.color
               : null)
           : null,
+        damage: empty ? null : detectDamage(text),
       };
     },
   });
@@ -351,6 +354,12 @@ export const Toolbar = ({
         <RotatePopover
           editor={editor}
           rotation={state.rotation}
+          disabled={state.empty || !state.hasHiero}
+        />
+        <ShadingPopover
+          editor={editor}
+          damage={state.damage}
+          hasHiero={state.hasHiero}
           disabled={state.empty || !state.hasHiero}
         />
         <ColorPopover

@@ -26,7 +26,8 @@
 
 import type { Editor } from "@tiptap/react";
 import type { Mark, Node as PMNode } from "@tiptap/pm/model";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { copyPreview } from "./exportImage";
 import { tryParse, whenReady } from "./hierojax";
 import { isHieroglyphic } from "./unicode";
 import "./Preview.css";
@@ -167,6 +168,11 @@ const renderParagraph = (
   return p;
 };
 
+/** Status of the most recent "Copy preview" click. Drives the button
+ *  label so the user knows the clipboard receive succeeded — image
+ *  copies are silent in every other app, which is disorienting. */
+type CopyStatus = "idle" | "copying" | "copied" | "error";
+
 export const Preview = ({
   editor,
   fontSize,
@@ -174,6 +180,48 @@ export const Preview = ({
   direction,
 }: IProps) => {
   const hostRef = useRef<HTMLDivElement>(null);
+  const [copyStatus, setCopyStatus] = useState<CopyStatus>("idle");
+
+  // Re-arm the label back to "Copy preview" after a beat. Tracked in
+  // a ref so we don't pile up timers when the user clicks rapidly.
+  const resetTimerRef = useRef<number | null>(null);
+  const setStatusWithReset = useCallback(
+    (next: CopyStatus, delayMs = 1800) => {
+      setCopyStatus(next);
+      if (resetTimerRef.current != null) {
+        window.clearTimeout(resetTimerRef.current);
+      }
+      if (next === "copied" || next === "error") {
+        resetTimerRef.current = window.setTimeout(() => {
+          setCopyStatus("idle");
+          resetTimerRef.current = null;
+        }, delayMs);
+      }
+    },
+    [],
+  );
+
+  useEffect(
+    () => () => {
+      if (resetTimerRef.current != null) {
+        window.clearTimeout(resetTimerRef.current);
+      }
+    },
+    [],
+  );
+
+  const onCopy = useCallback(async () => {
+    const host = hostRef.current;
+    if (!host) return;
+    setStatusWithReset("copying", 0);
+    try {
+      await copyPreview(host, fontSize);
+      setStatusWithReset("copied");
+    } catch (err) {
+      console.error("[lotus] copy preview failed", err);
+      setStatusWithReset("error");
+    }
+  }, [fontSize, setStatusWithReset]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -225,8 +273,23 @@ export const Preview = ({
       data-vertical-mode={verticalMode ? "true" : "false"}
     >
       <header className="preview__header">
-        <h2 className="preview__title">Preview</h2>
-        <p className="preview__hint">Live rendering</p>
+        <div className="preview__header-text">
+          <h2 className="preview__title">Preview</h2>
+          <p className="preview__hint">Live rendering</p>
+        </div>
+        <button
+          type="button"
+          className={`preview__copy preview__copy--${copyStatus}`}
+          onClick={onCopy}
+          disabled={copyStatus === "copying"}
+          title="Copy preview to clipboard — Word/Docs get editable text with vector glyphs, vector tools get SVG, others get a PNG"
+          aria-live="polite"
+        >
+          {copyStatus === "copying" && "Copying…"}
+          {copyStatus === "copied" && "Copied!"}
+          {copyStatus === "error" && "Copy failed"}
+          {copyStatus === "idle" && "Copy preview"}
+        </button>
       </header>
       <div
         ref={hostRef}
